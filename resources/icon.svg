@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <!-- Hub central (orquestador) -->
+  <circle cx="12" cy="12" r="2.6"/>
+  <!-- 3 nodos satélite (agentes paralelos) -->
+  <circle cx="12" cy="3.5" r="1.8"/>
+  <circle cx="4.5" cy="17.5" r="1.8"/>
+  <circle cx="19.5" cy="17.5" r="1.8"/>
+  <!-- Enlaces hub → satélites -->
+  <path d="M12 5.4 L12 9.4" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>
+  <path d="M5.9 16.5 L10.2 13.6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>
+  <path d="M18.1 16.5 L13.8 13.6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>
+</svg>

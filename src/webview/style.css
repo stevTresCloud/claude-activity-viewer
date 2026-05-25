@@ -1,0 +1,74 @@
+/* ================================================================
+ * style.css — Foundation del webview de Claude Orchestrator.
+ *
+ * Trae 3 cosas:
+ *   1. Tailwind v4 (un solo @import).
+ *   2. Codicons font + base CSS (@vscode/codicons).
+ *   3. @theme con design tokens del HANDOFF §1 mapeados a CSS vars
+ *      del IDE (var(--vscode-*)). El webview hereda automáticamente
+ *      esas vars del extension host, así que cambiar light↔dark en
+ *      VS Code repinta el dashboard sin tocar JS.
+ *
+ * En Tailwind v4 las declaraciones dentro de @theme generan las CSS
+ * vars en :root. Las que caen en namespaces conocidos (--color-*,
+ * --font-*, --text-*, etc.) además registran utilities automáticas;
+ * las que no, quedan como vars libres usables vía var() o
+ * `[var(--token)]` arbitrary values.
+ * ================================================================ */
+
+@import "tailwindcss";
+@import "@vscode/codicons/dist/codicon.css";
+
+@theme {
+  /* === Backgrounds === */
+  --background-view: var(--vscode-sideBar-background);
+  --background-card: var(--vscode-sideBar-background);
+  --background-input: var(--vscode-input-background);
+  --background-dropdown: var(--vscode-dropdown-background);
+  --background-badge: var(--vscode-editorWidget-background);
+  --background-button-secondary: var(--vscode-button-secondaryBackground);
+  --background-selection-active: var(--vscode-list-activeSelectionBackground);
+
+  /* === Foregrounds === */
+  --foreground: var(--vscode-editor-foreground);
+  --foreground-muted: var(--vscode-descriptionForeground);
+  --foreground-code: var(--vscode-editor-foreground);
+
+  /* === Borders === */
+  --border-subtle: var(--vscode-panel-border);
+  --border-input: var(--vscode-input-border);
+  --border-dropdown: var(--vscode-dropdown-border);
+  --focus-ring: var(--vscode-focusBorder);
+
+  /* === Status semantics (fallback hex si el theme no provee la var) === */
+  --color-success: var(--vscode-terminal-ansiGreen, #4caf50);
+  --color-warning: var(--vscode-editorWarning-foreground, #ff9800);
+  --color-error: var(--vscode-errorForeground, #f44336);
+  --color-info: var(--vscode-editorInfo-foreground, #2196f3);
+  --color-muted: var(--vscode-descriptionForeground);
+
+  /* === Tipografía === */
+  --font-ui: var(
+    --vscode-font-family,
+    "Segoe WPC", "Segoe UI", system-ui, -apple-system, sans-serif
+  );
+  --font-mono: var(
+    --vscode-editor-font-family,
+    "JetBrains Mono", Menlo, Monaco, Consolas, monospace
+  );
+}
+
+/* Reset mínimo: el webview vive en un <iframe> propio sin estilos
+ * heredados del IDE host, así que volvemos a definir defaults. */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--foreground);
+  background: var(--background-view);
+}

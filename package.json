@@ -29,12 +29,33 @@
         "command": "claudeOrchestrator.cancelTestAgent",
         "title": "Claude Orchestrator: Cancel Test Agent"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeOrchestrator",
+          "title": "Claude Agents",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeOrchestrator": [
+        {
+          "type": "webview",
+          "id": "claudeOrchestrator.dashboard",
+          "name": "Dashboard"
+        }
+      ]
+    }
   },
   "scripts": {
-    "compile": "node esbuild.config.mjs",
-    "watch": "node esbuild.config.mjs --watch",
-    "package": "node esbuild.config.mjs --production",
+    "compile:extension": "node esbuild.config.mjs",
+    "compile:webview": "vite build",
+    "compile": "npm run compile:extension && npm run compile:webview",
+    "watch:extension": "node esbuild.config.mjs --watch",
+    "watch:webview": "vite build --watch",
+    "package": "node esbuild.config.mjs --production && vite build",
     "vscode:prepublish": "npm run package",
     "lint": "eslint src",
     "test": "echo \"no tests yet\" && exit 0"
@@ -42,12 +63,19 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@vscode/codicons": "^0.0.36",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22",
     "@types/vscode": "^1.120.0",
+    "@vitejs/plugin-vue": "^5.2.0",
     "esbuild": "^0.24.0",
-    "typescript": "^5.9.3"
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0"
   }
 }

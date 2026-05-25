@@ -2,22 +2,26 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "type": "npm",
-      "script": "compile",
+      "label": "compile",
+      "type": "shell",
+      "command": "source $HOME/.nvm/nvm.sh && nvm use 24 > /dev/null && npm run compile",
+      "options": {
+        "shell": {
+          "executable": "/usr/bin/bash",
+          "args": ["-lc"]
+        }
+      },
       "group": {
         "kind": "build",
         "isDefault": true
       },
       "problemMatcher": "$tsc",
-      "label": "npm: compile"
-    },
-    {
-      "type": "npm",
-      "script": "watch",
-      "group": "build",
-      "problemMatcher": "$tsc-watch",
-      "isBackground": true,
-      "label": "npm: watch"
+      "presentation": {
+        "echo": false,
+        "reveal": "silent",
+        "panel": "shared",
+        "clear": true
+      }
     }
   ]
 }

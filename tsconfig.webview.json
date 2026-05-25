@@ -1,21 +1,20 @@
 {
   "compilerOptions": {
-    "module": "Node16",
     "target": "ES2022",
-    "lib": ["ES2022"],
-    "outDir": "out",
-    "rootDir": "src",
-    "sourceMap": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "moduleResolution": "Node16",
+    "jsx": "preserve",
     "esModuleInterop": true,
+    "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "noEmit": true,
+    "types": []
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "out", "src/webview"]
+  "include": ["src/webview/**/*"]
 }

@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { registerTestAgentCommands } from './commands/test-agent';
 import { AgentRunner } from './runtime/agent-runner';
 import { OrchestratorHttpServer } from './mcp/http-transport';
+import { DashboardViewProvider } from './views/dashboard';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -109,6 +110,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
     },
   });
+
+  // === Dashboard webview (sidebar) ===
+  // Registramos el provider que VS Code instancia cuando el user abre
+  // el Activity Bar de Claude Orchestrator. retainContextWhenHidden
+  // mantiene vivo el estado de Vue/Pinia mientras el sidebar está
+  // colapsado — el costo (~5MB RAM) es preferible a re-hidratar todo
+  // cada vez que se reabre.
+  const dashboardProvider = new DashboardViewProvider(context.extensionUri);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      DashboardViewProvider.viewType,
+      dashboardProvider,
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
+  );
 }
 
 /**
