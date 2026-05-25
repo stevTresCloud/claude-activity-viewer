@@ -9,7 +9,7 @@ VS Code extension to orchestrate multiple Claude Code agents in parallel via an 
 ## Architecture
 
 Authoritative spec lives in the project documentation:
-`~/git19/docs/stev-projects/claude-orchestrator/fase_1_plugin/ARCHITECTURE_PHASE_I.md`
+`~/stev-projects/claude-orchestrator/fase_1_plugin/ARCHITECTURE_PHASE_I.md`
 
 Quick overview: Claude Code chat triggers an MCP tool exposed by this extension; the extension spawns N agents via `@anthropic-ai/claude-agent-sdk` and renders them in a kanban dashboard inside VS Code. The user observes streams, cancels, and (optionally) sends messages from the dashboard.
 
