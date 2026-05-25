@@ -18,6 +18,14 @@
       {
         "command": "claudeOrchestrator.hello",
         "title": "Claude Orchestrator: Hello"
+      },
+      {
+        "command": "claudeOrchestrator.testAgent",
+        "title": "Claude Orchestrator: Test Agent"
+      },
+      {
+        "command": "claudeOrchestrator.cancelTestAgent",
+        "title": "Claude Orchestrator: Cancel Test Agent"
       }
     ]
   },
@@ -28,6 +36,9 @@
     "vscode:prepublish": "npm run package",
     "lint": "eslint src",
     "test": "echo \"no tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "*"
   },
   "devDependencies": {
     "@types/node": "^22",
