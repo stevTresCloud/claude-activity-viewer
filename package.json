@@ -1,0 +1,38 @@
+{
+  "name": "claude-orchestrator",
+  "displayName": "Claude Orchestrator",
+  "description": "VS Code extension to orchestrate multiple Claude Code agents in parallel via embedded MCP server + observable kanban dashboard.",
+  "version": "0.0.1",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.120.0",
+    "node": ">=22"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeOrchestrator.hello",
+        "title": "Claude Orchestrator: Hello"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "package": "node esbuild.config.mjs --production",
+    "vscode:prepublish": "npm run package",
+    "lint": "eslint src",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.120.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.9.3"
+  }
+}
