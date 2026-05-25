@@ -4,7 +4,7 @@ VS Code extension to orchestrate multiple Claude Code agents in parallel via an 
 
 ## Status
 
-**Phase 1.0 — scaffold base.** No functionality beyond a placeholder command. See architecture doc for the roadmap.
+Pre-release. The extension exposes an embedded MCP server with a single tool (`spawn_agents`) consumable from any external Claude Code chat. Dashboard UI is still pending.
 
 ## Architecture
 
@@ -21,7 +21,29 @@ npm run compile      # one-shot bundle via esbuild
 npm run watch        # rebuild on save
 ```
 
-In VS Code: press `F5` to open the Extension Development Host. Then `Ctrl+Shift+P → "Claude Orchestrator: Hello"` runs the placeholder command.
+In VS Code: press `F5` to open the Extension Development Host. Then `Ctrl+Shift+P → "Claude Orchestrator: Hello"` runs the placeholder command. The embedded MCP server starts automatically on activation and listens on `http://127.0.0.1:39127/mcp`.
+
+## Connecting Claude Code to the embedded MCP server
+
+The MCP server requires a bearer token to prevent any local process from invoking `spawn_agents` and spending your Anthropic credits or executing arbitrary tools. The token is generated on first activation and persisted in VS Code Secret Storage (encrypted via the OS keystore).
+
+While the Extension Development Host (or a packaged install) is running, the exact `claude mcp add-json` command — including your token — is printed to the **Claude Orchestrator** output channel on activation. Copy-paste it once per machine; it looks like:
+
+```bash
+claude mcp add-json --scope user claude-orchestrator '{"type":"http","url":"http://127.0.0.1:39127/mcp","headers":{"Authorization":"Bearer <token>"}}'
+```
+
+> Note: `claude mcp add --header` is variadic and incorrectly consumes the positional `<name>` and URL as header values, so this project uses `add-json` instead.
+
+Then, from any Claude Code chat (a different terminal or window — not the EDH itself), verify discovery:
+
+```bash
+claude mcp list
+```
+
+Available tools:
+
+- `spawn_agents` — spawn a Claude Code agent with a given prompt and return its result.
 
 ## License
 

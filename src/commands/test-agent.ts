@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import { AgentRunner } from '../runtime/agent-runner';
-import type { AgentEvent } from '../runtime/types';
+import type { AgentRunner } from '../runtime/agent-runner';
+import { logAgentEvent, ts } from '../runtime/log';
 
 // Prompt fijo del comando "Test Agent". Pensado para ejercer el ciclo
 // completo SDK → runner → OutputChannel + dar tiempo a cancelar mid-stream.
@@ -10,27 +10,22 @@ const TEST_PROMPT =
   'Por cada uno, leelo y dame un resumen de 1 línea de qué hace. ' +
   'No edites nada.';
 
-// Truncado defensivo del log para que un tool input/result enorme no
-// inunde el OutputChannel. El texto completo del agente sí va sin cortar.
-const LOG_TRUNCATE_AT = 200;
-
 /**
  * Registra los comandos del palette para probar un agente único.
  *
- * Fase 1.1: solo soporta UN test agent a la vez. Múltiples agentes en
- * paralelo entran en Fase 1.4 cuando el dashboard kanban exista.
+ * Soporta UN test agent a la vez. Múltiples agentes en paralelo entran
+ * más adelante cuando el dashboard kanban exista (y demanda compartir el
+ * runner con el MCP server, no instanciar uno propio).
  *
  * @param context  contexto de la extensión (para registrar disposables).
  * @param channel  OutputChannel compartido donde se loggean los eventos.
+ * @param runner   `AgentRunner` compartido con el resto de la extensión.
  */
 export function registerTestAgentCommands(
   context: vscode.ExtensionContext,
   channel: vscode.OutputChannel,
+  runner: AgentRunner,
 ): void {
-  // Runner compartido por ambos comandos: cachea el SDK ya importado y
-  // ahorra el costo del dynamic import en arranques sucesivos.
-  const runner = new AgentRunner();
-
   // Estado de la corrida activa (si hay). Cerrar/cancelar este controller
   // dispara el bridge interno del runner que aborta el subprocess SDK.
   let activeAbort: AbortController | null = null;
@@ -38,7 +33,7 @@ export function registerTestAgentCommands(
   const testCmd = vscode.commands.registerCommand(
     'claudeOrchestrator.testAgent',
     async () => {
-      // Guard: un solo test a la vez en Fase 1.1.
+      // Guard: un solo test a la vez por ahora.
       if (activeAbort) {
         vscode.window.showWarningMessage(
           'Ya hay un test agent corriendo. Cancelálo antes de lanzar otro.',
@@ -63,7 +58,7 @@ export function registerTestAgentCommands(
           prompt: TEST_PROMPT,
           cwd,
           abortSignal: activeAbort.signal,
-          onEvent: (event) => logEvent(channel, event),
+          onEvent: (event) => logAgentEvent(channel, event),
         });
         channel.appendLine(
           `[${ts()}] <<< done status=${result.status} tools=${result.toolCallCount}` +
@@ -95,50 +90,4 @@ export function registerTestAgentCommands(
   );
 
   context.subscriptions.push(testCmd, cancelCmd);
-}
-
-/**
- * Despacha un AgentEvent a una línea legible del OutputChannel.
- * Mantiene una línea por evento para que sea grep-friendly.
- */
-function logEvent(channel: vscode.OutputChannel, event: AgentEvent): void {
-  const stamp = ts();
-  switch (event.type) {
-    case 'thinking':
-      channel.appendLine(`[${stamp}] thinking: ${event.text}`);
-      break;
-    case 'text':
-      channel.appendLine(`[${stamp}] text: ${event.text}`);
-      break;
-    case 'tool_use':
-      channel.appendLine(
-        `[${stamp}] tool_use: ${event.name} input=${truncate(JSON.stringify(event.input), LOG_TRUNCATE_AT)}`,
-      );
-      break;
-    case 'tool_result':
-      channel.appendLine(
-        `[${stamp}] tool_result: id=${event.toolUseId} error=${event.isError} result=${truncate(event.result, LOG_TRUNCATE_AT)}`,
-      );
-      break;
-    case 'usage':
-      channel.appendLine(
-        `[${stamp}] usage: in=${event.inputTokens} out=${event.outputTokens}` +
-          ` cacheR=${event.cacheReadTokens} cacheC=${event.cacheCreationTokens}` +
-          ` cost=$${event.costUsd.toFixed(4)}`,
-      );
-      break;
-    case 'status':
-      channel.appendLine(`[${stamp}] status=${event.status}`);
-      break;
-  }
-}
-
-// HH:mm:ss.sss en hora local; usado como prefijo de cada línea del log.
-function ts(): string {
-  const d = new Date();
-  return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) + '…' : s;
 }

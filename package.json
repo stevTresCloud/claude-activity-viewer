@@ -11,7 +11,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -38,7 +40,9 @@
     "test": "echo \"no tests yet\" && exit 0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "*"
+    "@anthropic-ai/claude-agent-sdk": "*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22",

@@ -8,3 +8,5 @@ esbuild.config.mjs
 tsconfig.json
 node_modules/**
 !node_modules/@anthropic-ai/**
+!node_modules/@modelcontextprotocol/**
+!node_modules/zod/**

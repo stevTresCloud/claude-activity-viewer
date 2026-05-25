@@ -17,10 +17,9 @@ type SdkModule = typeof import(
  * No mantiene estado entre llamadas más allá del módulo SDK ya cargado en
  * memoria (caché lazy para reusar en arranques siguientes).
  *
- * Fase I: sin coordinación entre agentes, sin persistencia, sin retry.
- * La complejidad de damocles/team queda fuera deliberadamente; este runner
- * cubre el caso "un agente, una pregunta, una respuesta" que es el bloque
- * mínimo sobre el que se construirán las fases superiores.
+ * Sin coordinación entre agentes, sin persistencia, sin retry: cubre el
+ * caso "un agente, una pregunta, una respuesta" como bloque mínimo sobre
+ * el que se construye el resto del orquestador.
  */
 export class AgentRunner {
   private sdk: SdkModule | null = null;
@@ -75,7 +74,7 @@ export class AgentRunner {
       }
 
       // === SDK invocation ===
-      // Opciones mínimas Fase I:
+      // Opciones mínimas iniciales:
       //   - model 'sonnet': nombre corto que el SDK resuelve al snapshot
       //     vigente. Si queremos pin, se pasa el id completo.
       //   - tools preset 'claude_code': habilita todo el toolset por
@@ -84,7 +83,7 @@ export class AgentRunner {
       //     el SDK exige el flag explícito cuando se usa este modo (ver
       //     sdk.d.ts:1587). Sin prompts interactivos; aceptable porque el
       //     comando corre headless desde la paleta con prompt fijo.
-      //     Tightenear en Fase 1.5 cuando entren prompts del usuario.
+      //     Tightenear cuando entren prompts del usuario en lugar de prompts fijos.
       //   - settingSources ['user']: hereda skills y memoria del usuario
       //     (~/.claude/), no del workspace activo. Coherente con la idea
       //     "ventana del orquestador es global, no por proyecto".

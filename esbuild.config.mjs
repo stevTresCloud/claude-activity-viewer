@@ -7,7 +7,12 @@ const baseConfig = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
   outfile: 'out/extension.js',
-  external: ['vscode', '@anthropic-ai/claude-agent-sdk'],
+  external: [
+    'vscode',
+    '@anthropic-ai/claude-agent-sdk',
+    '@modelcontextprotocol/sdk',
+    'zod',
+  ],
   format: 'cjs',
   platform: 'node',
   target: 'node20',
