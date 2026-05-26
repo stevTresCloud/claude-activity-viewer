@@ -9,14 +9,11 @@
  *       L1: dot pulse + name + ModelBadge + elapsed
  *       L2: subtitle · current_tool
  *       L3: ContextBar
- *       L4: 3 botones decorativos + sweeping progress bar
+ *       L4: AgentActionRow (pause/cancel/open) + sweeping bar
  *
  * El `margin-left: -2px` alinea el stripe con el borde izquierdo del
  * container del project group (que tiene padding 10px). Sin el
  * margin, la stripe queda 2px adentro y se nota un escalón.
- *
- * Los botones son decorativos por ahora; los handlers se cablean
- * cuando la extensión y el webview hablen via postMessage.
  *
  * La variante "standalone" (vista Single project) existe como
  * componente separado en `AgentCardRunningStandalone.vue` para no
@@ -32,6 +29,7 @@ import { useNow } from '../../composables/useNow';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
+import AgentActionRow from './AgentActionRow.vue';
 
 const props = defineProps<{
   agent: Agent;
@@ -78,17 +76,11 @@ const elapsedText = computed(() => {
       <ContextBar :pct="agent.contextUsedPct" :tokens-used="agent.tokensUsed" />
     </div>
 
-    <!-- === L4: actions inline + sweeping progress bar === -->
+    <!-- === L4: actions + sweeping progress bar inline ===
+         El sweep ocupa el espacio sobrante a la derecha de los 3
+         botones (flex:1). -->
     <div class="line indented actions">
-      <button type="button" class="action" aria-label="pause">
-        <i class="codicon codicon-debug-pause" />
-      </button>
-      <button type="button" class="action" aria-label="cancel">
-        <i class="codicon codicon-close" />
-      </button>
-      <button type="button" class="action" aria-label="open">
-        <i class="codicon codicon-link-external" />
-      </button>
+      <AgentActionRow :agent="agent" />
       <div class="progress-track">
         <div class="progress-bar sweep-bar" />
       </div>
@@ -155,36 +147,18 @@ const elapsedText = computed(() => {
   color: var(--foreground);
 }
 
-/* === L4 — actions + sweeping bar === */
+/* === L4 — actions container ===
+ * AgentActionRow ya trae los 3 botones; acá solo el contenedor flex
+ * con gap y el track del sweep bar que llena el espacio sobrante. */
 .actions {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.action {
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-subtle);
-  background: var(--background-button-secondary);
-  color: var(--foreground);
-  border-radius: 3px;
-  cursor: pointer;
-  padding: 0;
-}
-.action:hover {
-  background: rgb(255 255 255 / 0.1);
-}
-.action .codicon {
-  font-size: 10px;
-  line-height: 1;
-}
 
-/* Sweeping bar: vive en su propio track de 2px que toma el espacio
- * sobrante del row de actions. El bar interno tiene width 25% y se
- * desplaza con keyframes `sweep` (declarado en style.css). */
+/* Sweeping bar: track 2px que toma el espacio sobrante (flex:1) a
+ * la derecha de los 3 botones. El bar interno tiene width 25% del
+ * track y se desplaza con keyframes `sweep` (style.css). */
 .progress-track {
   flex: 1;
   margin-left: 6px;

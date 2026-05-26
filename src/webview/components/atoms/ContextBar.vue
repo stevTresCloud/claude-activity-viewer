@@ -49,7 +49,12 @@ const fillColor = computed(() => {
 const formatK = (n: number) => `${Math.round(n / 1000)}k`;
 
 const labelRight = computed(() => {
-  if (props.tokensUsed !== undefined) {
+  // tokensUsed > 0 → versión larga "116k / 200k · 58%". Si llega
+  // como undefined o 0 (agente recién spawneado, sin usage event
+  // todavía) mostramos solo el porcentaje — el mockup HANDOFF lo
+  // pide así y el "0k / 200k · 0%" comprimía la columna sin aportar
+  // información útil.
+  if (props.tokensUsed !== undefined && props.tokensUsed > 0) {
     return `${formatK(props.tokensUsed)} / ${formatK(props.tokensTotal)} · ${props.pct}%`;
   }
   return `${props.pct}%`;
@@ -83,6 +88,11 @@ const clampedPct = computed(() => Math.max(0, Math.min(100, props.pct)));
   display: flex;
   flex-direction: column;
   gap: 3px;
+  /* width 100% para que `.label-row` con space-between separe
+   * "Context" del porcentaje a los extremos del row. Sin esto el
+   * componente solo ocupa el content-width y los dos labels quedan
+   * pegados sin espacio entre ellos. */
+  width: 100%;
 }
 .label-row {
   display: flex;

@@ -32,6 +32,10 @@
       {
         "command": "claudeOrchestrator.rescan",
         "title": "Claude Orchestrator: Rescan projects and sessions"
+      },
+      {
+        "command": "claudeOrchestrator.focusDashboard",
+        "title": "Claude Orchestrator: Focus dashboard"
       }
     ],
     "viewsContainers": {
@@ -73,6 +77,11 @@
           "type": "boolean",
           "default": false,
           "description": "If true, show a confirmation dialog before resuming a past Claude session."
+        },
+        "claudeOrchestrator.cancelConfirm": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, show a confirmation dialog before cancelling a running agent from the dashboard."
         },
         "claudeOrchestrator.resumeIn": {
           "type": "string",

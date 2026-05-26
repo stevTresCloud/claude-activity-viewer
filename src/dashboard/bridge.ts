@@ -32,7 +32,12 @@ import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { AgentRunner } from '../runtime/agent-runner';
-import type { AgentEvent, AgentStatus as RuntimeAgentStatus } from '../runtime/types';
+import {
+  DEFAULT_MODEL,
+  type AgentEvent,
+  type AgentStatus as RuntimeAgentStatus,
+  type ModelAlias,
+} from '../runtime/types';
 import { logAgentEvent, ts } from '../runtime/log';
 import type {
   AgentCompletedResult,
@@ -90,6 +95,12 @@ export interface SpawnInput {
   projectOverride?: string;
   /** Lo agrupa visualmente con otros agentes del mismo batch_id. */
   batchId?: string;
+  /**
+   * Alias del modelo a pedirle al SDK. Default DEFAULT_MODEL. El
+   * SDK puede resolverlo a un id distinto; el model badge se
+   * actualiza al recibir el `system.init` con el id efectivo.
+   */
+  model?: ModelAlias;
 }
 
 /** Output sincrónico de spawn. La promise `finished` resuelve cuando termina. */
@@ -137,6 +148,12 @@ export class DashboardBridge {
   // esto, cerrar y reabrir el sidebar deja la sección PAST SESSIONS
   // vacía hasta el siguiente tick del auto-refresh.
   private readonly attachCallbacks: Array<() => void> = [];
+
+  // Listeners del count de agentes running. Lo consume el
+  // StatusBar item (extension host). Mantenemos array porque la
+  // suscripción/de-suscripción es rara (1 por activación de la
+  // extension); no vale la pena un Set.
+  private readonly runningCountListeners: Array<(count: number) => void> = [];
 
   // Persistencia debounced: cada evento agenda un flush, sucesivos
   // mientras el timer corre se colapsan en uno solo. Sin esto, un
@@ -203,6 +220,11 @@ export class DashboardBridge {
       // post-hydrate se demore por el debounce.
       await this.context.globalState.update(STATE_KEY, this.serialize());
     }
+    // Tras hidratar puede haber huérfanos marcados failed/cancelled
+    // (o ninguno running todavía). Notificamos para que el status
+    // bar arranque con el count correcto sin esperar al primer
+    // spawn.
+    this.notifyRunningCount();
   }
 
   /**
@@ -290,6 +312,10 @@ export class DashboardBridge {
     );
 
     const startedAtIso = new Date().toISOString();
+    // Modelo inicial: el alias que el caller pidió (o
+    // DEFAULT_MODEL). Se sobreescribe con la versión real cuando el
+    // SDK emita el init message (AgentEvent type='model').
+    const requestedModel = input.model ?? DEFAULT_MODEL;
     const snapshot: AgentSnapshot = {
       id: agentId,
       name,
@@ -298,6 +324,7 @@ export class DashboardBridge {
       task: context.task,
       branch: context.branch,
       batchId,
+      model: prettyModel(requestedModel),
       startedAtIso,
       elapsedMs: 0,
       tokensUsed: 0,
@@ -320,6 +347,9 @@ export class DashboardBridge {
     );
     this.post({ type: 'agent_created', agent: { ...snapshot } });
     this.schedulePersist();
+    // Acaba de entrar un nuevo agente running — refrescamos el
+    // count para el status bar.
+    this.notifyRunningCount();
 
     // === Run en background ===
     // No await acá: el caller puede observar via `finished` si le
@@ -358,6 +388,75 @@ export class DashboardBridge {
     }
   }
 
+  /**
+   * Devuelve la info operacional que el handler `request_open`
+   * necesita (sessionId + cwd) para abrir/resumir la sesión del
+   * agente vivo. Mantenemos `cwd` fuera del wire AgentSnapshot —
+   * vive solo en el bridge porque ningún componente Vue lo
+   * renderea hoy, y el handler del scanner-controller lo necesita
+   * server-side para invocar el URI handler del plugin claude-code.
+   *
+   * Nombrado por intención (no como "getMeta") para que no invite
+   * a Vue consumers a tomar `cwd` de acá: el contrato es "datos
+   * para resumir", no "metadata genérica de agente".
+   *
+   * Retorna `null` si el agentId no existe.
+   */
+  getResumeTarget(
+    agentId: string,
+  ): { sessionId?: string; cwd: string; name: string } | null {
+    const stored = this.agents.get(agentId);
+    if (!stored) return null;
+    return {
+      sessionId: stored.snapshot.sessionId,
+      cwd: stored.cwd,
+      name: stored.snapshot.name,
+    };
+  }
+
+  /**
+   * Suscripción al cambio de cantidad de agentes en estado
+   * `running`. El status bar item se actualiza con cada delta. El
+   * callback recibe el count actual y se invoca SYNC tras cada
+   * mutación que pudo cambiarlo (spawn, status_changed terminal,
+   * cancel, hydrate). El bridge no batchea — varios deltas en el
+   * mismo tick disparan el callback varias veces; el StatusBar
+   * filtra duplicados a nivel de su propio render.
+   */
+  onRunningCountChange(cb: (count: number) => void): () => void {
+    this.runningCountListeners.push(cb);
+    // Emitimos el count actual al suscribirse para que el StatusBar
+    // se pinte coherente sin esperar al primer cambio.
+    cb(this.getRunningCount());
+    return () => {
+      const i = this.runningCountListeners.indexOf(cb);
+      if (i >= 0) this.runningCountListeners.splice(i, 1);
+    };
+  }
+
+  /** Cantidad de agentes en estado `running` ahora mismo. */
+  getRunningCount(): number {
+    let n = 0;
+    for (const stored of this.agents.values()) {
+      if (stored.snapshot.status === 'running') n++;
+    }
+    return n;
+  }
+
+  private notifyRunningCount(): void {
+    if (this.runningCountListeners.length === 0) return;
+    const count = this.getRunningCount();
+    for (const cb of this.runningCountListeners) {
+      try {
+        cb(count);
+      } catch (err) {
+        this.channel.appendLine(
+          `[${ts()}] [bridge] running-count listener error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   // ====================================================================
   // === Runner integration =============================================
   // ====================================================================
@@ -384,6 +483,7 @@ export class DashboardBridge {
       const result = await this.runner.startAgent({
         prompt: input.prompt,
         cwd: input.cwd,
+        model: input.model,
         abortSignal: signal,
         onEvent: (event) => {
           // Log al OutputChannel para diagnóstico (igual que MCP/palette ya hacían).
@@ -429,6 +529,29 @@ export class DashboardBridge {
             });
             return;
           }
+
+          if (event.type === 'session_id') {
+            // Llega UNA vez por agente (primer message del SDK).
+            // Lo guardamos en el snapshot del registry y emitimos un
+            // status_changed con metadata para que el webview lo
+            // settee sin esperar al terminal. El botón Open de la
+            // card lo necesita mientras el agente todavía corre.
+            this.emitStatusChange(agentId, 'running', {
+              sessionId: event.sessionId,
+            });
+            return;
+          }
+
+          if (event.type === 'model') {
+            // Llega UNA vez por agente, junto al `system.init`. El
+            // SDK puede resolver `'sonnet'` (alias) a un id largo
+            // tipo `claude-sonnet-4-5-20251022`. Formateamos a label
+            // con versión ("Sonnet 4.5") para el badge de la card.
+            this.emitStatusChange(agentId, 'running', {
+              model: prettyModel(event.name),
+            });
+            return;
+          }
         },
       });
 
@@ -462,6 +585,12 @@ export class DashboardBridge {
     } finally {
       this.aborts.delete(agentId);
       this.schedulePersist();
+      // El agente acaba de transicionar running → done/failed/cancelled.
+      // El bloque terminal mutó `stored.snapshot.status` directo (sin
+      // pasar por `emitStatusChange`), así que el notifyRunningCount
+      // que ESO dispararía no corrió. Lo lanzamos acá para que el
+      // status bar baje el count al cierre.
+      this.notifyRunningCount();
     }
   }
 
@@ -478,13 +607,30 @@ export class DashboardBridge {
     // para que un attach posterior vea ya el state actualizado.
     const stored = this.agents.get(agentId);
     if (stored) {
-      stored.snapshot.status = status;
+      // Invariante "una vez terminal, no se vuelve a running": si
+      // un AgentEvent llega tarde (race entre el bloque terminal
+      // del run() y los últimos eventos del SDK), no degradamos
+      // el status. Igual mergeamos metadata útil (sessionId/model)
+      // — eso sí mantiene info válida.
+      const isTerminal =
+        stored.snapshot.status === 'done' ||
+        stored.snapshot.status === 'failed' ||
+        stored.snapshot.status === 'cancelled';
+      if (!isTerminal) {
+        stored.snapshot.status = status;
+      }
       if (metadata) {
         Object.assign(stored.snapshot, metadata);
       }
     }
     this.post({ type: 'agent_status_changed', agentId, status, metadata });
     this.schedulePersist();
+    // NO notificamos count acá: por contrato hoy todos los call
+    // sites de emitStatusChange pasan status='running' (cambios de
+    // metadata mid-run). El terminal lo notifica el `finally` de
+    // run() después de mutar el snapshot directo. Sin esto, cada
+    // tool_use/usage spawnaba un getRunningCount() + listener loop
+    // sin que el count realmente cambiara.
   }
 
   /**
@@ -614,6 +760,47 @@ export class DashboardBridge {
 // ====================================================================
 // === Helpers de módulo (exportables para tests futuros) =============
 // ====================================================================
+
+function capitalize(s: string): string {
+  return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s;
+}
+
+/**
+ * Convierte el id de modelo crudo del SDK a un label legible para
+ * el ModelBadge de la card. Reconoce:
+ *
+ *   - id largo `claude-<family>-<major>-<minor>(-<sufijo>)?` →
+ *     `<Family> <major>.<minor>` (ej. "Sonnet 4.5", "Opus 4.7").
+ *     `family` acepta cualquier slug de letras + guiones, así que
+ *     una familia futura ("claude-something-1-0-20300101") cae al
+ *     mismo formato en vez de quedar como id raw.
+ *   - alias corto sin guiones → capitalizado sin versión.
+ *   - cualquier otro string → se devuelve tal cual.
+ *
+ * Charset assumption: los ids del SDK usan letras y guiones (`-`).
+ * Si Anthropic introduce underscore (`_`) o digits en family, este
+ * regex no lo matchea y caemos al fallback `return raw`. No es
+ * blocker (el badge muestra el id), pero conviene ampliar charset
+ * cuando aparezca un caso real.
+ *
+ * Exportable y puro para tests sin filesystem ni network.
+ */
+export function prettyModel(raw: string): string {
+  if (!raw) return '';
+  // Id largo: `claude-<family>-<major>-<minor>(-<sufijo>)?`. El
+  // family slug es greedy hasta dos números consecutivos separados
+  // por guion (`<major>-<minor>`); el resto del string (fecha o
+  // tag) lo descartamos.
+  const long = /^claude-([a-z][a-z-]*?)-(\d+)-(\d+)(?:-.*)?$/i.exec(raw);
+  if (long) {
+    return `${capitalize(long[1])} ${long[2]}.${long[3]}`;
+  }
+  // Alias corto: una palabra de letras, sin guiones ni dígitos.
+  if (/^[a-z]+$/i.test(raw)) {
+    return capitalize(raw);
+  }
+  return raw;
+}
 
 /**
  * Mapea el AgentStatus del runtime al del wire UI.
@@ -885,6 +1072,14 @@ function translateToLogEntry(event: AgentEvent): LogEntry | null {
     case 'status':
       // Los status changes los emitimos como agent_status_changed
       // (canal específico para que la UI no tenga que filtrar).
+      return null;
+    case 'session_id':
+      // Identidad de la sesión; no es contenido de log. Va al
+      // snapshot via agent_status_changed (ver onEvent del run).
+      return null;
+    case 'model':
+      // Modelo resuelto por el SDK; va al snapshot via
+      // agent_status_changed, no al log streaming.
       return null;
     default: {
       const _exhaustive: never = event;

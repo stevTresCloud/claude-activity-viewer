@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { z } from 'zod';
+import { MODEL_ALIASES, type ModelAlias } from '../runtime/types';
 
 // === Input schema del tool `spawn_agents` ===
 //
@@ -53,9 +54,12 @@ export const SPAWN_AGENTS_INPUT_SHAPE = {
             'Directorio de trabajo absoluto. Determina project/task/branch del dashboard.',
           ),
         model: z
-          .enum(['sonnet', 'opus', 'haiku'])
+          .enum(MODEL_ALIASES)
           .optional()
-          .describe('Forward-compat: hoy se ignora; el runner usa sonnet.'),
+          .describe(
+            'Alias del modelo a usar. Default sonnet. El SDK resuelve a id con versión ' +
+              '(ej. claude-sonnet-4-5-XXX) y el dashboard muestra la versión real.',
+          ),
         priority: z
           .enum(['low', 'med', 'high'])
           .optional()
@@ -98,7 +102,7 @@ export type SpawnAgentsArgs = {
     name?: string;
     prompt: string;
     cwd: string;
-    model?: 'sonnet' | 'opus' | 'haiku';
+    model?: ModelAlias;
     priority?: 'low' | 'med' | 'high';
   }>;
   options?: { project?: string; max_parallel?: number };

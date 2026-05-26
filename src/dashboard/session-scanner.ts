@@ -71,7 +71,7 @@ const FIRST_PROMPT_FULL_MAX_CHARS = 400;
  * cuando el controller construya `claude --resume <sessionId>` en
  * una terminal. Anchor a ^$ en el matcher.
  */
-const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // === Tipos del JSONL (subset que parseamos) ===
 

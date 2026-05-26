@@ -1,4 +1,17 @@
-import type { AgentResult, AgentRunConfig } from './types';
+import { DEFAULT_MODEL, type AgentResult, type AgentRunConfig } from './types';
+
+/**
+ * Forma mínima del envelope de un `SDKMessage`. El SDK ya tipa cada
+ * variante (assistant/user/system/result/…) pero todas comparten
+ * `session_id`, y la variante system aporta `subtype` + `model`.
+ * Centralizamos el cast acá para no repetir `as { ... }` en cada
+ * lectura del loop.
+ */
+interface SDKEnvelope {
+  session_id?: string;
+  subtype?: string;
+  model?: string;
+}
 
 // El SDK de Anthropic es ESM-only (sdk.mjs). El extension host de VS Code
 // es CommonJS, así que el módulo solo se puede traer con dynamic import.
@@ -37,6 +50,18 @@ export class AgentRunner {
     let cacheReadTokens = 0;
     let cacheCreationTokens = 0;
     let costUsd = 0;
+    // SessionId del SDK. Lo descubrimos en el envelope de cualquier
+    // SDKMessage (assistant/user/system/result lo traen) y emitimos
+    // un AgentEvent dedicado la primera vez para que el bridge pueda
+    // actualizar el snapshot del agente vivo. Sin esto, el sessionId
+    // recién aparecería al cierre y el botón Open no podría abrir
+    // el chat del plugin claude-code mientras el agente corre.
+    let sessionId: string | undefined;
+    // Modelo real reportado por el SDK en el `system.init` message.
+    // El runner arranca con el alias del caller ('sonnet' default),
+    // pero el SDK puede resolverlo a otro id; queremos mostrar lo
+    // que el SDK efectivamente eligió, no lo que pedimos.
+    let resolvedModel: string | undefined;
 
     // === Abort wiring ===
     // El SDK toma su propio AbortController en `options.abortController`.
@@ -91,7 +116,11 @@ export class AgentRunner {
         prompt: config.prompt,
         options: {
           cwd: config.cwd,
-          model: 'sonnet',
+          // Respetamos lo que pidió el caller (MCP / palette);
+          // default DEFAULT_MODEL. El SDK lo resuelve a su id
+          // interno y lo reporta en SDKSystemMessage.init.model —
+          // capturado abajo y emitido como AgentEvent('model').
+          model: config.model ?? DEFAULT_MODEL,
           tools: { type: 'preset', preset: 'claude_code' },
           abortController: sdkAbortController,
           permissionMode: 'bypassPermissions',
@@ -111,6 +140,31 @@ export class AgentRunner {
         if (config.abortSignal.aborted) {
           status = 'cancelled';
           break;
+        }
+
+        // === Captura de identidad y modelo del envelope ===
+        // Cualquier SDKMessage del envelope trae `session_id`; el
+        // primer system.init además trae `model`. Capturamos UNA
+        // vez cada uno y emitimos AgentEvent dedicado. Outer guard
+        // corta el bloque entero una vez tenemos ambos, así el
+        // resto de mensajes del stream (~cientos) no leen
+        // propiedades que ya no necesitamos.
+        if (!sessionId || !resolvedModel) {
+          const envelope = event as SDKEnvelope;
+          if (!sessionId && typeof envelope.session_id === 'string' && envelope.session_id.length > 0) {
+            sessionId = envelope.session_id;
+            config.onEvent({ type: 'session_id', sessionId });
+          }
+          if (
+            !resolvedModel &&
+            event.type === 'system' &&
+            envelope.subtype === 'init' &&
+            typeof envelope.model === 'string' &&
+            envelope.model.length > 0
+          ) {
+            resolvedModel = envelope.model;
+            config.onEvent({ type: 'model', name: resolvedModel });
+          }
         }
 
         switch (event.type) {
@@ -228,6 +282,8 @@ export class AgentRunner {
       cacheReadTokens,
       cacheCreationTokens,
       costUsd,
+      sessionId,
+      model: resolvedModel,
     };
   }
 }

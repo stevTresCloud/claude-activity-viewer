@@ -6,6 +6,7 @@ import { OrchestratorHttpServer } from './mcp/http-transport';
 import { DashboardViewProvider } from './views/dashboard';
 import { DashboardBridge } from './dashboard/bridge';
 import { ScannerController } from './dashboard/scanner-controller';
+import { FOCUS_DASHBOARD_COMMAND, StatusBarManager } from './dashboard/status-bar';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -146,6 +147,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   );
   context.subscriptions.push(rescanCmd);
+
+  // === Status bar item con conteo de agentes running ===
+  // Muestra `$(rocket) N agents` cuando hay 1+ corriendo, hidden
+  // cuando no hay nada. Click salta al sidebar. Cumple UC-06 del
+  // DESIGN.md ("ver el conteo de agentes activos en la status bar").
+  const statusBar = new StatusBarManager(bridge);
+  context.subscriptions.push(statusBar);
+
+  const focusDashboardCmd = vscode.commands.registerCommand(
+    FOCUS_DASHBOARD_COMMAND,
+    () => {
+      // El viewContainer id del package.json es `claudeOrchestrator`.
+      // VS Code expone el comando bien conocido
+      // `workbench.view.extension.<id>` para enfocarlo. Sin args,
+      // abre el panel y selecciona la primera vista del container
+      // (nuestra `claudeOrchestrator.dashboard`).
+      void vscode.commands.executeCommand(
+        'workbench.view.extension.claudeOrchestrator',
+      );
+    },
+  );
+  context.subscriptions.push(focusDashboardCmd);
 
   // === Dashboard webview (sidebar) ===
   // Registramos el provider que VS Code instancia cuando el user abre

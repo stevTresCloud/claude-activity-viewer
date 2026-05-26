@@ -138,6 +138,7 @@ export class OrchestratorMcpServer {
               cwd: task.cwd,
               batchId,
               projectOverride: args.options?.project,
+              model: task.model,
             });
             agentIds.push(agentId);
           }

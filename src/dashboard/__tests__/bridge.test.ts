@@ -43,6 +43,7 @@ import {
   deriveProjectContext,
   deriveProjectContextPure,
   derivePathFromPrompt,
+  prettyModel,
   runtimeToWireStatus,
 } from '../bridge';
 import type {
@@ -61,6 +62,7 @@ import {
   __setConfig,
   __setWorkspaceFolders,
 } from '../../__mocks__/vscode';
+import { makeContext, makeOutputChannel } from './_fixtures';
 
 // =====================================================================
 // === Helpers de test =================================================
@@ -118,43 +120,6 @@ interface StoredAgentLike {
   cwd: string;
   prompt: string;
   log: LogEntry[];
-}
-
-/**
- * makeContext — fake ExtensionContext con `globalState` respaldado
- * por un Map en memoria. Cubre las APIs que el bridge usa: `get`,
- * `update`. Cada test recibe una instancia fresca.
- */
-function makeContext() {
-  const store = new Map<string, unknown>();
-  return {
-    globalState: {
-      get<T>(key: string, defaultValue?: T): T {
-        return (store.has(key) ? (store.get(key) as T) : (defaultValue as T));
-      },
-      update(key: string, value: unknown): Thenable<void> {
-        store.set(key, value);
-        return Promise.resolve();
-      },
-      keys(): readonly string[] {
-        return [...store.keys()];
-      },
-    },
-  };
-}
-
-/** Fake OutputChannel: solo necesita absorber appendLine. */
-function makeOutputChannel() {
-  return {
-    appendLine: vi.fn<(line: string) => void>(),
-    append: vi.fn<(s: string) => void>(),
-    clear: vi.fn<() => void>(),
-    show: vi.fn<() => void>(),
-    hide: vi.fn<() => void>(),
-    dispose: vi.fn<() => void>(),
-    name: 'test',
-    replace: vi.fn(),
-  };
 }
 
 /** Fake Webview con postMessage espiable. */
@@ -223,6 +188,44 @@ describe('runtimeToWireStatus', () => {
     // undefined) para que la UI no rompa. Pasamos un valor fuera
     // del enum forzando el cast.
     expect(runtimeToWireStatus('unknown-status' as never)).toBe('failed');
+  });
+});
+
+// =====================================================================
+// === prettyModel =====================================================
+// =====================================================================
+
+describe('prettyModel', () => {
+  it('id largo de Sonnet 4.5 → "Sonnet 4.5"', () => {
+    expect(prettyModel('claude-sonnet-4-5-20251022')).toBe('Sonnet 4.5');
+  });
+  it('id largo de Opus 4.7 → "Opus 4.7"', () => {
+    expect(prettyModel('claude-opus-4-7-20260101')).toBe('Opus 4.7');
+  });
+  it('id largo de Haiku → "Haiku <ver>"', () => {
+    expect(prettyModel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5');
+  });
+  it('id largo sin sufijo de fecha también matchea', () => {
+    expect(prettyModel('claude-sonnet-4-5')).toBe('Sonnet 4.5');
+  });
+  it('alias corto "sonnet" → "Sonnet"', () => {
+    expect(prettyModel('sonnet')).toBe('Sonnet');
+  });
+  it('alias corto "opus" → "Opus"', () => {
+    expect(prettyModel('opus')).toBe('Opus');
+  });
+  it('familia futura sigue el mismo formato (forward-compat)', () => {
+    // Un futuro "claude-something-1-0-20300101" debería pintar
+    // "Something 1.0" en vez de quedar como id raw. La regex acepta
+    // cualquier slug de letras como family.
+    expect(prettyModel('claude-something-1-0-20300101')).toBe('Something 1.0');
+  });
+  it('id que no matchea el shape "claude-<family>-<X>-<Y>" se devuelve raw', () => {
+    // Sin la estructura family+major+minor, no pintamos.
+    expect(prettyModel('gpt-4-turbo')).toBe('gpt-4-turbo');
+  });
+  it('string vacío retorna vacío', () => {
+    expect(prettyModel('')).toBe('');
   });
 });
 
@@ -843,6 +846,107 @@ describe('DashboardBridge — integración', () => {
     expect(() => bridge.attachWebview(webview as never)).not.toThrow();
     expect(calls).toEqual(['survived']);
     expect(postedOf(webview, 'agent_list')).toHaveLength(1);
+  });
+
+  it('snapshot inicial usa "Sonnet" cuando el caller no pide modelo', () => {
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    const created = postedOf(webview, 'agent_created')[0];
+    expect(created.agent.model).toBe('Sonnet');
+    runner.finish();
+  });
+
+  it('snapshot inicial respeta SpawnInput.model (alias)', () => {
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj', model: 'opus' });
+    const created = postedOf(webview, 'agent_created')[0];
+    expect(created.agent.model).toBe('Opus');
+    // El bridge debe forward-ear el alias al runner para que el SDK
+    // lo use de verdad (sin esto, el badge mentiría diciendo Opus
+    // mientras el SDK corre sonnet).
+    expect(runner.lastConfig?.model).toBe('opus');
+    runner.finish();
+  });
+
+  it('AgentEvent type=model reemplaza el badge con la versión real del SDK', () => {
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    // El SDK reporta el id largo en system.init; el runner lo emite
+    // como evento `model`. El bridge debe formatear y emitir status
+    // change con el label nuevo.
+    runner.emit({ type: 'model', name: 'claude-sonnet-4-5-20251022' });
+    const changes = postedOf(webview, 'agent_status_changed');
+    const withModel = changes.find((c) => c.metadata?.model !== undefined);
+    expect(withModel?.metadata?.model).toBe('Sonnet 4.5');
+    runner.finish();
+  });
+
+  it('AgentEvent session_id propaga al snapshot vía agent_status_changed', () => {
+    bridge.attachWebview(webview as never);
+    const { agentId } = bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    runner.emit({
+      type: 'session_id',
+      sessionId: 'deadbeef-1234-4abc-9def-012345678abc',
+    });
+    const changes = postedOf(webview, 'agent_status_changed');
+    const withSession = changes.find((c) => c.metadata?.sessionId !== undefined);
+    expect(withSession).toBeDefined();
+    expect(withSession?.metadata?.sessionId).toBe(
+      'deadbeef-1234-4abc-9def-012345678abc',
+    );
+    // El registry interno también lo recuerda (lo consume el handler
+    // request_open vía getResumeTarget).
+    expect(bridge.getResumeTarget(agentId)?.sessionId).toBe(
+      'deadbeef-1234-4abc-9def-012345678abc',
+    );
+    runner.finish();
+  });
+
+  it('getResumeTarget retorna sessionId + cwd + name; null si no existe', () => {
+    bridge.attachWebview(webview as never);
+    const { agentId } = bridge.spawn({
+      name: 'my-agent',
+      prompt: 'hi',
+      cwd: '/repos/myproj/tasks/x',
+    });
+    const meta = bridge.getResumeTarget(agentId);
+    expect(meta).toEqual({
+      sessionId: undefined,
+      cwd: '/repos/myproj/tasks/x',
+      name: 'my-agent',
+    });
+    expect(bridge.getResumeTarget('no-such-id')).toBeNull();
+    runner.finish();
+  });
+
+  it('onRunningCountChange emite count actual al suscribirse y tras cada delta', async () => {
+    const calls: number[] = [];
+    const unsubscribe = bridge.onRunningCountChange((n) => calls.push(n));
+    // Suscripción inicial: count=0 (sin spawns todavía).
+    expect(calls[0]).toBe(0);
+
+    bridge.attachWebview(webview as never);
+    const { agentId, finished } = bridge.spawn({
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    // Tras spawn el running count subió a 1.
+    expect(calls.at(-1)).toBe(1);
+
+    // Cerrar el agente baja el count a 0.
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await finished;
+    expect(calls.at(-1)).toBe(0);
+
+    // Des-registrar: spawns posteriores ya no notifican.
+    unsubscribe();
+    const lenBefore = calls.length;
+    bridge.spawn({ prompt: 'hi2', cwd: '/repos/myproj' });
+    expect(calls.length).toBe(lenBefore);
+    runner.finish({ status: 'completed', durationMs: 1 });
+    // Limpieza del registry para que el agentId no quede colgando
+    // entre tests si afterEach falla.
+    expect(agentId).toBeDefined();
   });
 
   it('ringbuffer per-agent FIFO: el log se acota a 1000 entries descartando el más viejo', async () => {
