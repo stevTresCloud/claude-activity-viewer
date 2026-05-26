@@ -84,10 +84,10 @@ const counts = computed(() => ({
       <h2>ContextBar</h2>
       <div class="stack">
         <ContextBar :pct="18" />
-        <ContextBar :pct="29" :tokens-used="58_000" />
-        <ContextBar :pct="58" :tokens-used="116_000" />
-        <ContextBar :pct="72" :tokens-used="144_000" />
-        <ContextBar :pct="92" :tokens-used="184_000" />
+        <ContextBar :pct="29" :context-tokens="58_000" />
+        <ContextBar :pct="58" :context-tokens="116_000" />
+        <ContextBar :pct="72" :context-tokens="144_000" />
+        <ContextBar :pct="92" :context-tokens="184_000" />
       </div>
     </section>
 

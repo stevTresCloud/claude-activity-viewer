@@ -17,9 +17,15 @@
 
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { SPAWN_AGENTS_INPUT_SHAPE } from '../types';
+import {
+  GET_AGENT_LOG_INPUT_SHAPE,
+  LIST_AGENTS_INPUT_SHAPE,
+  SPAWN_AGENTS_INPUT_SHAPE,
+} from '../types';
 
 const schema = z.object(SPAWN_AGENTS_INPUT_SHAPE);
+const listAgentsSchema = z.object(LIST_AGENTS_INPUT_SHAPE);
+const getAgentLogSchema = z.object(GET_AGENT_LOG_INPUT_SHAPE);
 
 const validTask = {
   prompt: 'hola',
@@ -129,6 +135,63 @@ describe('SPAWN_AGENTS_INPUT_SHAPE — inputs inválidos', () => {
     // bound un caller podría inyectar un AgentCard ilegible en la UI.
     const result = schema.safeParse({
       tasks: [{ ...validTask, name: '' }],
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('LIST_AGENTS_INPUT_SHAPE — tool sin args', () => {
+  it('object vacío pasa', () => {
+    const result = listAgentsSchema.safeParse({});
+    expect(result.success).toBe(true);
+  });
+
+  it('campos extras se ignoran (strip default de Zod) sin tirar', () => {
+    // Forward-compat: si el chat externo manda args extras por
+    // accidente (ej. un cliente MCP que evolucionó), Zod los
+    // strippea silenciosamente y el safeParse retorna success.
+    // La tool sigue ejecutando con shape limpio.
+    const result = listAgentsSchema.safeParse({ extra: 1 });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('GET_AGENT_LOG_INPUT_SHAPE — args y bounds', () => {
+  it('agent_id solo (sin since) pasa', () => {
+    const result = getAgentLogSchema.safeParse({ agent_id: 'abc-123' });
+    expect(result.success).toBe(true);
+  });
+
+  it('agent_id + since válido pasa', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'abc-123',
+      since: 1_700_000_000_000,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rechaza agent_id vacío (sin id no podemos resolver el agente)', () => {
+    const result = getAgentLogSchema.safeParse({ agent_id: '' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza agent_id ausente', () => {
+    const result = getAgentLogSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza since negativo (epoch ms es non-negative por def)', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'abc',
+      since: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza since no entero (queremos epoch ms exacto)', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'abc',
+      since: 100.5,
     });
     expect(result.success).toBe(false);
   });

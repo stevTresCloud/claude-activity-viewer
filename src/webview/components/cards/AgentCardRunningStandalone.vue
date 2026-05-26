@@ -31,6 +31,7 @@ import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
 import { useNow } from '../../composables/useNow';
+import { useShowDetail } from '../../composables/useShowDetail';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -39,6 +40,14 @@ import AgentActionRow from './AgentActionRow.vue';
 const props = defineProps<{
   agent: Agent;
 }>();
+
+// Click en el body abre el detail panel (mismo flujo que la
+// variante in-group; los botones de AgentActionRow llevan
+// @click.stop así que no disparan este handler).
+const detail = useShowDetail();
+function onBodyClick(): void {
+  detail.show(props.agent.id);
+}
 
 // elapsed deriva de useNow() — el wire trae startedAtIso absoluto
 // y la card hace la diferencia local cada tick. Misma lógica que
@@ -56,7 +65,15 @@ const elapsedText = computed(() => {
 </script>
 
 <template>
-  <div class="card">
+  <div
+    class="card"
+    role="button"
+    :aria-label="`Open ${agent.name} detail view`"
+    tabindex="0"
+    @click="onBodyClick"
+    @keydown.enter="onBodyClick"
+    @keydown.space.prevent="onBodyClick"
+  >
     <!-- === L1: dot + name + model + elapsed === -->
     <div class="line line-1">
       <StatusDot status="running" pulse />
@@ -74,7 +91,7 @@ const elapsedText = computed(() => {
 
     <!-- === L3: context bar === -->
     <div v-if="agent.contextUsedPct !== undefined" class="line indented">
-      <ContextBar :pct="agent.contextUsedPct" :tokens-used="agent.tokensUsed" />
+      <ContextBar :pct="agent.contextUsedPct" :context-tokens="agent.contextTokens" />
     </div>
 
     <!-- === L4: actions sin sweep inline (sweep va absolute abajo) === -->
@@ -106,6 +123,15 @@ const elapsedText = computed(() => {
   /* overflow:hidden para que el sweep bar no se salga del radius
    * del card en su esquina inferior. */
   overflow: hidden;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+.card:hover {
+  background: rgb(127 127 127 / 0.04);
+}
+.card:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
 }
 
 .line {

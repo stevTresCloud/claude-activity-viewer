@@ -671,6 +671,59 @@ describe('DashboardBridge — integración', () => {
     runner.finish();
   });
 
+  it('contextUsedPct + contextTokens INCLUYEN cache tokens; tokensUsed sigue siendo billable del turn', () => {
+    // Repro del bug: el SDK reporta input_tokens=1 y output_tokens=8
+    // pero cache_read_input_tokens=105583 + cache_creation_input_tokens=14254.
+    // El contexto activo REAL son los ~120k de cache, no los 9 tokens
+    // nuevos. Sin esto el ContextBar quedaba en 0% durante todo
+    // el run porque casi todo viaja por el prompt cache de Anthropic.
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    runner.emit({
+      type: 'usage',
+      inputTokens: 1,
+      outputTokens: 8,
+      cacheReadTokens: 105_583,
+      cacheCreationTokens: 14_254,
+      costUsd: 0,
+    });
+    const changes = postedOf(webview, 'agent_status_changed');
+    const last = changes[changes.length - 1];
+    // tokensUsed = 1 + 8 = 9 (costo billable del turn, sin cache).
+    expect(last.metadata?.tokensUsed).toBe(9);
+    // contextTokens = 1 + 105583 + 14254 = 119838 (context activo,
+    // suma input+cacheRead+cacheCreation; matchea matemáticamente
+    // con el porcentaje).
+    expect(last.metadata?.contextTokens).toBe(119_838);
+    // contextUsedPct = 119838 / 200000 = 59.92% → 60%.
+    expect(last.metadata?.contextUsedPct).toBe(60);
+    runner.finish();
+  });
+
+  it('usage events sucesivos REEMPLAZAN, no acumulan (semántica "context activo ahora")', () => {
+    // El runner emite un usage event por cada `assistant` message
+    // del SDK (cada turno trae su propio context window). El bridge
+    // debe reemplazar el último valor — no sumar — porque
+    // `input_tokens` ya incluye el contexto histórico del turno.
+    // Si sumáramos, el ContextBar dispararía al 200% en pocos
+    // turnos.
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    emitUsage(runner, 20_000, 500);
+    emitUsage(runner, 50_000, 1_500);
+    emitUsage(runner, 80_000, 2_000);
+    const changes = postedOf(webview, 'agent_status_changed').filter(
+      (c) => c.metadata?.tokensUsed !== undefined,
+    );
+    expect(changes).toHaveLength(3);
+    // Último valor refleja la última invocación (80k+2k=82k, 40%),
+    // NO la suma 150k+4k.
+    const last = changes[changes.length - 1];
+    expect(last.metadata?.tokensUsed).toBe(82_000);
+    expect(last.metadata?.contextUsedPct).toBe(40);
+    runner.finish();
+  });
+
   it('al terminal emite UN agent_completed con duration y tokens definitivos', async () => {
     bridge.attachWebview(webview as never);
     const { agentId, finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
@@ -868,6 +921,38 @@ describe('DashboardBridge — integración', () => {
     runner.finish();
   });
 
+  it('sin input.model usa setting `defaultModel` del user', () => {
+    // El user configuró `defaultModel=haiku` en su settings.json.
+    // El MCP call no especificó model → bridge debe leer el setting
+    // y forward-earlo al runner.
+    __setConfig('claudeOrchestrator', 'defaultModel', 'haiku');
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    const created = postedOf(webview, 'agent_created')[0];
+    expect(created.agent.model).toBe('Haiku');
+    expect(runner.lastConfig?.model).toBe('haiku');
+    runner.finish();
+  });
+
+  it('input.model gana sobre el setting defaultModel (override explícito)', () => {
+    __setConfig('claudeOrchestrator', 'defaultModel', 'haiku');
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj', model: 'opus' });
+    expect(runner.lastConfig?.model).toBe('opus');
+    runner.finish();
+  });
+
+  it('setting defaultModel con valor inválido cae al fallback "sonnet"', () => {
+    // Defensa contra settings.json viejos/manipulados: si el setting
+    // tiene un valor fuera del enum, NO lo pasamos al runner —
+    // caemos al DEFAULT_MODEL hardcoded para que el SDK no rechace.
+    __setConfig('claudeOrchestrator', 'defaultModel', 'gpt-4');
+    bridge.attachWebview(webview as never);
+    bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    expect(runner.lastConfig?.model).toBe('sonnet');
+    runner.finish();
+  });
+
   it('AgentEvent type=model reemplaza el badge con la versión real del SDK', () => {
     bridge.attachWebview(webview as never);
     bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
@@ -947,6 +1032,258 @@ describe('DashboardBridge — integración', () => {
     // Limpieza del registry para que el agentId no quede colgando
     // entre tests si afterEach falla.
     expect(agentId).toBeDefined();
+  });
+
+  it('onAgentCompleted dispara una vez por agente cuando llega a terminal', async () => {
+    bridge.attachWebview(webview as never);
+    const events: Array<{ agentId: string; name: string; status: string }> = [];
+    const unsubscribe = bridge.onAgentCompleted((e) => {
+      events.push({ agentId: e.agentId, name: e.name, status: e.status });
+    });
+    const { agentId, finished } = bridge.spawn({
+      name: 'my-agent',
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    runner.finish({ status: 'completed', durationMs: 4321 });
+    await finished;
+    expect(events).toHaveLength(1);
+    expect(events[0].agentId).toBe(agentId);
+    expect(events[0].name).toBe('my-agent');
+    expect(events[0].status).toBe('done');
+    unsubscribe();
+  });
+
+  it('onAgentCompleted: status failed/cancelled también dispara', async () => {
+    bridge.attachWebview(webview as never);
+    const events: Array<{ status: string }> = [];
+    bridge.onAgentCompleted((e) => events.push({ status: e.status }));
+    const { finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    runner.finish({ status: 'failed', durationMs: 100, finalResponse: 'oom' });
+    await finished;
+    expect(events).toHaveLength(1);
+    expect(events[0].status).toBe('failed');
+  });
+
+  it('onAgentCompleted: listener que tira no rompe al siguiente', async () => {
+    bridge.attachWebview(webview as never);
+    const survivors: string[] = [];
+    bridge.onAgentCompleted(() => {
+      throw new Error('boom');
+    });
+    bridge.onAgentCompleted((e) => survivors.push(e.agentId));
+    const { agentId, finished } = bridge.spawn({
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await finished;
+    expect(survivors).toEqual([agentId]);
+  });
+
+  it('onAgentCompleted: unsubscribe deja de recibir notifs', async () => {
+    bridge.attachWebview(webview as never);
+    const events: string[] = [];
+    const unsub = bridge.onAgentCompleted((e) => events.push(e.agentId));
+    unsub();
+    const { finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await finished;
+    expect(events).toHaveLength(0);
+  });
+
+  it('hydrateLogs emite agent_log_history con todo el ringbuffer del agente', () => {
+    bridge.attachWebview(webview as never);
+    const { agentId, finished } = bridge.spawn({
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    runner.emit({ type: 'text', text: 'first' });
+    runner.emit({ type: 'text', text: 'second' });
+    runner.emit({ type: 'tool_use', name: 'Read', input: { file_path: '/x.ts' } });
+
+    bridge.hydrateLogs(agentId);
+
+    const histories = postedOf(webview, 'agent_log_history');
+    expect(histories).toHaveLength(1);
+    expect(histories[0].agentId).toBe(agentId);
+    expect(histories[0].entries).toHaveLength(3);
+    expect(histories[0].entries[0].kind).toBe('text');
+    expect(histories[0].entries[2].kind).toBe('tool_use');
+
+    runner.finish();
+    return finished;
+  });
+
+  it('listAgents retorna agentes en insertion-order como shallow copies', async () => {
+    // Hacemos 2 spawns secuenciales, finalizando el primero antes
+    // del segundo: el FakeAgentRunner solo soporta un resolver
+    // activo, y el afterEach del describe espera Promise.allSettled
+    // de los runs antes del flush.
+    bridge.attachWebview(webview as never);
+    const r1 = bridge.spawn({ name: 'first', prompt: 'a', cwd: '/repos/p1' });
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await r1.finished;
+    const r2 = bridge.spawn({ name: 'second', prompt: 'b', cwd: '/repos/p2' });
+
+    const list = bridge.listAgents();
+    expect(list).toHaveLength(2);
+    expect(list[0].id).toBe(r1.agentId);
+    expect(list[1].id).toBe(r2.agentId);
+    expect(list[0].name).toBe('first');
+    expect(list[1].name).toBe('second');
+
+    // Shallow copy: mutar el resultado no afecta al registry.
+    list[0].name = 'mutated';
+    expect(bridge.listAgents()[0].name).toBe('first');
+
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await r2.finished;
+  });
+
+  it('getAgentLog retorna entries del agente; null si no existe', () => {
+    bridge.attachWebview(webview as never);
+    const { agentId, finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/p' });
+    runner.emit({ type: 'text', text: 'e1' });
+    runner.emit({ type: 'text', text: 'e2' });
+
+    const result = bridge.getAgentLog(agentId);
+    expect(result).not.toBeNull();
+    expect(result?.entries).toHaveLength(2);
+    expect(result?.entries[0]?.text).toBe('e1');
+
+    expect(bridge.getAgentLog('no-such-id')).toBeNull();
+
+    runner.finish();
+    return finished;
+  });
+
+  it('getAgentLog filtra por `since` (ts > since)', async () => {
+    // Usamos fake timers para que cada emit tenga un ts distinto.
+    // Sin esto, los 3 entries pueden caer en el mismo Date.now() y
+    // el filter `>since` retorna ninguno.
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    bridge.attachWebview(webview as never);
+    const { agentId, finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/p' });
+
+    runner.emit({ type: 'text', text: 'a' });
+    vi.advanceTimersByTime(10);
+    runner.emit({ type: 'text', text: 'b' });
+    vi.advanceTimersByTime(10);
+    runner.emit({ type: 'text', text: 'c' });
+
+    const all = bridge.getAgentLog(agentId)?.entries ?? [];
+    expect(all).toHaveLength(3);
+
+    // Pedimos entries con ts > el del segundo → solo el tercero queda.
+    const tsCut = all[1].ts;
+    const filtered = bridge.getAgentLog(agentId, tsCut)?.entries ?? [];
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].text).toBe('c');
+
+    // since del último → array vacío.
+    const tsLast = all[2].ts;
+    expect(bridge.getAgentLog(agentId, tsLast)?.entries).toEqual([]);
+
+    vi.useRealTimers();
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await finished;
+  });
+
+  it('hydrateLogs con agentId inexistente emite entries vacíos (no-op silencioso)', () => {
+    bridge.attachWebview(webview as never);
+    bridge.hydrateLogs('no-such-agent');
+    const histories = postedOf(webview, 'agent_log_history');
+    expect(histories).toHaveLength(1);
+    expect(histories[0].agentId).toBe('no-such-agent');
+    expect(histories[0].entries).toEqual([]);
+  });
+
+  it('hydrateLogs con targetWebview envía SOLO a ese webview (no broadcast)', () => {
+    // Critical: el detail panel pasa su propio webview para evitar
+    // que el sidebar reciba 1000 entries que no usa. Si alguien
+    // revierte el `if (targetWebview)` del bridge, este test rompe.
+    const webview2 = makeWebview();
+    bridge.attachWebview(webview as never);
+    bridge.attachWebview(webview2 as never);
+    const { agentId, finished } = bridge.spawn({
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    runner.emit({ type: 'text', text: 'entry-1' });
+
+    // Hydrate dirigido SOLO a webview2.
+    bridge.hydrateLogs(agentId, webview2 as never);
+
+    const w1History = postedOf(webview, 'agent_log_history');
+    const w2History = postedOf(webview2, 'agent_log_history');
+    expect(w1History).toHaveLength(0);
+    expect(w2History).toHaveLength(1);
+    expect(w2History[0].entries).toHaveLength(1);
+
+    runner.finish({ status: 'completed', durationMs: 1 });
+    return finished;
+  });
+
+  it('multi-webview broadcast: post() llega a TODOS los webviews attached', async () => {
+    // Sidebar attache primero (sin agentes en el registry).
+    bridge.attachWebview(webview as never);
+
+    // Spawn de un agente.
+    const { agentId, finished } = bridge.spawn({
+      prompt: 'hi',
+      cwd: '/repos/myproj',
+    });
+    runner.emit({ type: 'text', text: 'broadcast me' });
+
+    // AHORA attache un segundo webview (simulando detail panel
+    // abierto on-demand después de que el agente ya está vivo).
+    const webview2 = makeWebview();
+    bridge.attachWebview(webview2 as never);
+
+    // El sidebar recibió agent_created + agent_log (eventos
+    // broadcasteados después de su attach).
+    expect(postedOf(webview, 'agent_created')).toHaveLength(1);
+    expect(postedOf(webview, 'agent_log')).toHaveLength(1);
+    // El sidebar recibió agent_list SOLO al attach inicial (0 agents).
+    const lists1 = postedOf(webview, 'agent_list');
+    expect(lists1).toHaveLength(1);
+    expect(lists1[0].agents).toHaveLength(0);
+
+    // El detail panel (webview2) recibió SU agent_list al attach
+    // con el agente ya vivo en el registry.
+    const lists2 = postedOf(webview2, 'agent_list');
+    expect(lists2).toHaveLength(1);
+    expect(lists2[0].agents).toHaveLength(1);
+    expect(lists2[0].agents[0].id).toBe(agentId);
+
+    // Emit posterior llega a AMBOS (broadcast).
+    runner.emit({ type: 'text', text: 'after attach' });
+    const logs1 = postedOf(webview, 'agent_log');
+    const logs2 = postedOf(webview2, 'agent_log');
+    expect(logs1.length).toBeGreaterThanOrEqual(2);
+    expect(logs2.length).toBeGreaterThanOrEqual(1);
+
+    runner.finish({ status: 'completed', durationMs: 1 });
+    await finished;
+  });
+
+  it('detachWebview saca al webview del broadcast sin afectar a los demás', async () => {
+    const webview2 = makeWebview();
+    bridge.attachWebview(webview as never);
+    const token2 = bridge.attachWebview(webview2 as never);
+
+    bridge.detachWebview(token2);
+
+    const { finished } = bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
+    runner.emit({ type: 'text', text: 'only webview' });
+    runner.finish();
+    await finished;
+
+    // Solo el sidebar (webview) recibió eventos post-detach.
+    expect(postedOf(webview, 'agent_log').length).toBeGreaterThan(0);
+    expect(postedOf(webview2, 'agent_log')).toHaveLength(0);
   });
 
   it('ringbuffer per-agent FIFO: el log se acota a 1000 entries descartando el más viejo', async () => {

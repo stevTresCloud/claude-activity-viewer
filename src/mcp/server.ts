@@ -5,7 +5,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { DashboardBridge } from '../dashboard/bridge';
 import { ts } from '../runtime/log';
-import { SPAWN_AGENTS_INPUT_SHAPE, type SpawnAgentsArgs } from './types';
+import {
+  GET_AGENT_LOG_INPUT_SHAPE,
+  LIST_AGENTS_INPUT_SHAPE,
+  SPAWN_AGENTS_INPUT_SHAPE,
+  type GetAgentLogArgs,
+  type SpawnAgentsArgs,
+} from './types';
 
 export interface OrchestratorMcpServerOptions {
   channel: vscode.OutputChannel;
@@ -58,6 +64,8 @@ export class OrchestratorMcpServer {
   ): Promise<void> {
     const server = new McpServer(this.serverInfo);
     this.registerSpawnAgents(server);
+    this.registerListAgents(server);
+    this.registerGetAgentLog(server);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -113,7 +121,15 @@ export class OrchestratorMcpServer {
           'Spawnea uno o más agentes Claude Code en paralelo y retorna sus IDs inmediatamente. ' +
           'Los agentes corren en background con el toolset preset claude_code (Read/Edit/Bash/Grep/etc.) ' +
           'y herencia de skills + memoria del usuario (~/.claude/). ' +
-          'Observación del progreso vía el dashboard del plugin (sidebar VS Code).',
+          'Observación del progreso vía el dashboard del plugin (sidebar VS Code).\n\n' +
+          'MODEL SELECTION: Each task accepts an optional `model` field with one of ' +
+          '"sonnet" (balanced cost/capability — default), "opus" (highest capability, slower, ' +
+          'more expensive), or "haiku" (fastest, cheapest). If the user did not specify a model ' +
+          'in their request, prefer to ASK them which model to use before spawning expensive ' +
+          'long-running agents, especially when the task is exploratory or low-stakes — using ' +
+          'haiku or sonnet over opus can save significant cost. If the user already stated a ' +
+          'preferred model in the conversation, respect that without re-asking. When omitted, ' +
+          'the orchestrator falls back to the user\'s `claudeOrchestrator.defaultModel` setting.',
         inputSchema: SPAWN_AGENTS_INPUT_SHAPE,
       },
       async (args: SpawnAgentsArgs) => {
@@ -176,6 +192,94 @@ export class OrchestratorMcpServer {
             {
               type: 'text' as const,
               text: JSON.stringify(payload, null, 2),
+            },
+          ],
+        };
+      },
+    );
+  }
+
+  // === Tool: list_agents ===
+  //
+  // Snapshot del registry del bridge. Lo consume el chat externo
+  // para preguntas tipo "qué agentes tengo / cómo van". Retorna
+  // todos los agentes (vivos + terminados que sobrevivieron al
+  // TTL del globalState) en formato wire compacto.
+  private registerListAgents(server: McpServer): void {
+    server.registerTool(
+      'list_agents',
+      {
+        title: 'List agents',
+        description:
+          'Lista todos los agentes en el registry del orchestrator (vivos + terminados recientes). ' +
+          'Devuelve por cada uno: id, name, status, project, task, branch, model, sessionId opcional, ' +
+          'timestamps de inicio/fin, duración, tokens y razón terminal si aplica. ' +
+          'Útil para preguntas tipo "qué tengo corriendo" o "cómo terminaron mis agentes".',
+        inputSchema: LIST_AGENTS_INPUT_SHAPE,
+      },
+      async () => {
+        const agents = this.bridge.listAgents();
+        this.channel.appendLine(
+          `[${ts()}] [mcp] list_agents count=${agents.length}`,
+        );
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ agents }, null, 2),
+            },
+          ],
+        };
+      },
+    );
+  }
+
+  // === Tool: get_agent_log ===
+  //
+  // Ringbuffer de logs del agente (max 1000 entries FIFO). Si
+  // `since` viene, filtra por timestamp para que el chat externo
+  // pueda paginar incremental — guarda el ts del último entry
+  // recibido y pide el delta en la próxima call.
+  private registerGetAgentLog(server: McpServer): void {
+    server.registerTool(
+      'get_agent_log',
+      {
+        title: 'Get agent log',
+        description:
+          'Devuelve los eventos del log de un agente (thinking, text, tool_use, tool_result, usage). ' +
+          'Ringbuffer de 1000 entries FIFO del bridge. ' +
+          'Argumentos: agent_id (required), since (opcional, epoch ms para paginación incremental). ' +
+          'Si el agentId no existe, retorna `{error: "agent_not_found", agent_id}`.',
+        inputSchema: GET_AGENT_LOG_INPUT_SHAPE,
+      },
+      async (args: GetAgentLogArgs) => {
+        const result = this.bridge.getAgentLog(args.agent_id, args.since);
+        if (!result) {
+          this.channel.appendLine(
+            `[${ts()}] [mcp] get_agent_log agent=${args.agent_id.slice(0, 8)} not_found`,
+          );
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  { error: 'agent_not_found', agent_id: args.agent_id },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+        this.channel.appendLine(
+          `[${ts()}] [mcp] get_agent_log agent=${args.agent_id.slice(0, 8)} entries=${result.entries.length}${args.since !== undefined ? ` since=${args.since}` : ''}`,
+        );
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };

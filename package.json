@@ -83,6 +83,22 @@
           "default": false,
           "description": "If true, show a confirmation dialog before cancelling a running agent from the dashboard."
         },
+        "claudeOrchestrator.notifyOnComplete": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true, show a VS Code notification toast when an agent finishes (done / failed / cancelled). Click 'Open detail' on the toast to jump to the detail panel."
+        },
+        "claudeOrchestrator.defaultModel": {
+          "type": "string",
+          "enum": ["sonnet", "opus", "haiku"],
+          "default": "sonnet",
+          "enumDescriptions": [
+            "Sonnet — balanced cost/capability (default)",
+            "Opus — highest capability, slowest, most expensive",
+            "Haiku — fastest, cheapest, lowest capability"
+          ],
+          "description": "Default Claude model used when an agent is spawned without an explicit model. Applies to MCP spawn_agents calls that omit the 'model' field and to the palette command 'Test Agent' when the user picks the default option."
+        },
         "claudeOrchestrator.resumeIn": {
           "type": "string",
           "enum": ["chat", "terminal"],

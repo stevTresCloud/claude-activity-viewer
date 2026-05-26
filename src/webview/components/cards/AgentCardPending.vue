@@ -15,6 +15,7 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatRelative } from '../../utils/format';
+import { useShowDetail } from '../../composables/useShowDetail';
 import PriorityPill from '../atoms/PriorityPill.vue';
 
 const props = defineProps<{
@@ -26,10 +27,23 @@ const props = defineProps<{
 // === "X ago" derivado del queued_since vs el now actual ===
 
 const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
+
+const detail = useShowDetail();
+function onBodyClick(): void {
+  detail.show(props.agent.id);
+}
 </script>
 
 <template>
-  <div class="card">
+  <div
+    class="card"
+    role="button"
+    :aria-label="`Open ${agent.name} detail view`"
+    tabindex="0"
+    @click="onBodyClick"
+    @keydown.enter="onBodyClick"
+    @keydown.space.prevent="onBodyClick"
+  >
     <span class="index">{{ index }}</span>
     <span class="name">{{ agent.name }}</span>
     <PriorityPill v-if="agent.priority" :priority="agent.priority" />
@@ -46,6 +60,16 @@ const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
   border-left: 3px solid var(--stripe-pending);
   padding-left: 9px;
   margin-left: -2px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color 100ms ease;
+}
+.card:hover {
+  background: rgb(127 127 127 / 0.04);
+}
+.card:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
 }
 
 /* === Index badge — 18×18 cuadrado con borde, look "queue position" === */

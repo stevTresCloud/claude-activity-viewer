@@ -11,10 +11,10 @@
  * y el porcentaje (con tokens opcionales) a la derecha en
  * tabular-nums para que no baile cuando cambian dígitos.
  *
- * `tokensUsed` y `tokensTotal` son opcionales; si vienen ambos se
- * muestra "{used}k / {total}k · {pct}%", si solo viene el pct se
- * muestra "{pct}%". Formato compacto para que no rompa en sidebars
- * angostos.
+ * `contextTokens` y `tokensTotal` son opcionales; si vienen ambos
+ * se muestra "{used}k / {total}k · {pct}%", si solo viene el pct
+ * se muestra "{pct}%". Formato compacto para que no rompa en
+ * sidebars angostos.
  *
  * Referencia: HANDOFF.md §2.11.
  */
@@ -25,8 +25,18 @@ const props = withDefaults(
   defineProps<{
     /** Porcentaje 0-100 del context usado. */
     pct: number;
-    /** Tokens usados, opcional. Se muestra solo si ambos vienen. */
-    tokensUsed?: number;
+    /**
+     * Tokens cargados en el context window activo. Coincide
+     * matemáticamente con `pct` (= contextTokens / tokensTotal *
+     * 100). Cuando viene, mostramos `Xk / 200k · pct%`. Cuando no,
+     * mostramos solo `pct%` — el agente recién spawneado no tiene
+     * usage event aún, mostrar `0k / 200k · 0%` agrega ruido.
+     *
+     * NO confundir con `agent.tokensUsed` (= costo billable del
+     * último turn) — ese se muestra en RECENT cards y completion
+     * toast, no acá.
+     */
+    contextTokens?: number;
     /** Tokens máximos del context window (default 200k Claude). */
     tokensTotal?: number;
   }>(),
@@ -49,13 +59,12 @@ const fillColor = computed(() => {
 const formatK = (n: number) => `${Math.round(n / 1000)}k`;
 
 const labelRight = computed(() => {
-  // tokensUsed > 0 → versión larga "116k / 200k · 58%". Si llega
-  // como undefined o 0 (agente recién spawneado, sin usage event
-  // todavía) mostramos solo el porcentaje — el mockup HANDOFF lo
-  // pide así y el "0k / 200k · 0%" comprimía la columna sin aportar
-  // información útil.
-  if (props.tokensUsed !== undefined && props.tokensUsed > 0) {
-    return `${formatK(props.tokensUsed)} / ${formatK(props.tokensTotal)} · ${props.pct}%`;
+  // contextTokens > 0 → versión larga "119k / 200k · 60%" que
+  // matchea matemáticamente con el porcentaje. Si llega undefined
+  // o 0 (agente recién spawneado, sin usage event aún) mostramos
+  // solo el porcentaje — `0k / 200k · 0%` agrega ruido sin info útil.
+  if (props.contextTokens !== undefined && props.contextTokens > 0) {
+    return `${formatK(props.contextTokens)} / ${formatK(props.tokensTotal)} · ${props.pct}%`;
   }
   return `${props.pct}%`;
 });

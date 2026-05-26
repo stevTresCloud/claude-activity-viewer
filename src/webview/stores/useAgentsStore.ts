@@ -21,16 +21,16 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { Agent, Project } from '../types';
-import type {
-  AgentCompletedResult,
-  AgentSnapshot,
-  AgentStatus,
-  LogEntry,
+import {
+  LOG_RING_MAX,
+  type AgentCompletedResult,
+  type AgentSnapshot,
+  type AgentStatus,
+  type LogEntry,
 } from '../../shared/dashboard-protocol';
 import { useNow } from '../composables/useNow';
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-const LOG_RING_MAX = 1000;
 
 export const useAgentsStore = defineStore('agents', () => {
   // === State ===
@@ -90,16 +90,37 @@ export const useAgentsStore = defineStore('agents', () => {
   }
 
   /**
-   * Append a un log per-agent con bound FIFO 1000. Hoy nadie lo
-   * renderea desde la UI; el detail panel futuro lo consumirá.
+   * Append a un log per-agent con bound FIFO 1000. El detail panel
+   * lo consume vía el getter `logsByAgent[agentId]`.
+   *
+   * Inicializamos UNA vez si no existe la key (entrega un nuevo
+   * array) y después mutamos in-place con push/shift. Sin esto, el
+   * patrón anterior `logsByAgent.value[agentId] = arr` re-asignaba
+   * la key en cada entry, disparando el proxy `set` trap y
+   * notificando consumidores aunque la referencia del array no
+   * cambiara. Vue ya rastrea push/shift sobre el array reactivo.
    */
   function appendLog(agentId: string, entry: LogEntry): void {
-    const arr = logsByAgent.value[agentId] ?? [];
+    let arr = logsByAgent.value[agentId];
+    if (!arr) {
+      arr = [];
+      logsByAgent.value[agentId] = arr;
+    }
     arr.push(entry);
     if (arr.length > LOG_RING_MAX) {
       arr.shift();
     }
-    logsByAgent.value[agentId] = arr;
+  }
+
+  /**
+   * Reemplaza el log per-agent con el ringbuffer hidratado del
+   * bridge. Lo dispara el dispatcher cuando llega un
+   * `agent_log_history` (el detail panel lo pide al montar). Los
+   * entries vienen ya ordenados y bounded a 1000 del lado bridge,
+   * así que no hace falta re-shiftear acá.
+   */
+  function replaceLogsForAgent(agentId: string, entries: LogEntry[]): void {
+    logsByAgent.value[agentId] = entries.slice();
   }
 
   /**
@@ -308,6 +329,7 @@ export const useAgentsStore = defineStore('agents', () => {
     addAgent,
     updateAgentStatus,
     appendLog,
+    replaceLogsForAgent,
     markAgentCompleted,
     // getters
     nowPlaying,

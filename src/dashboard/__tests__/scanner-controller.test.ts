@@ -57,6 +57,8 @@ function makeBridge() {
         | { sessionId?: string; cwd: string; name: string }
         | null
     >(() => null),
+    /** Pass-through del handler `request_hydrate_logs`. */
+    hydrateLogs: vi.fn<(agentId: string) => void>(),
   };
 }
 
@@ -219,5 +221,32 @@ describe('ScannerController.handleMessage — request_open', () => {
     controller.handleMessage({ type: 'request_open', agentId: '' });
     expect(bridge.getResumeTarget).not.toHaveBeenCalled();
     expect(__getExecutedCommands()).toHaveLength(0);
+  });
+});
+
+// =====================================================================
+// === request_hydrate_logs NO se maneja en scanner-controller =========
+// =====================================================================
+//
+// El detail panel (views/detail-panel.ts) intercepta este evento
+// antes de delegar al scanner y llama bridge.hydrateLogs con su
+// propio webview como target. Eso evita serializar el ringbuffer
+// al sidebar. Verificamos que el scanner NO toque bridge.hydrateLogs
+// cuando le llega ese tipo de mensaje (defensa contra reintroducir
+// un pass-through que broadcast-earía a todos).
+
+describe('ScannerController.handleMessage — request_hydrate_logs (no-op)', () => {
+  beforeEach(() => {
+    __resetVscode();
+  });
+
+  it('NO llama bridge.hydrateLogs (interceptado upstream por detail-panel)', () => {
+    const bridge = makeBridge();
+    const controller = makeController(bridge);
+    controller.handleMessage({
+      type: 'request_hydrate_logs',
+      agentId: 'agent-abc',
+    });
+    expect(bridge.hydrateLogs).not.toHaveBeenCalled();
   });
 });

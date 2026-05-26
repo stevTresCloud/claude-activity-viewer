@@ -4,9 +4,12 @@ import { registerTestAgentCommands } from './commands/test-agent';
 import { AgentRunner } from './runtime/agent-runner';
 import { OrchestratorHttpServer } from './mcp/http-transport';
 import { DashboardViewProvider } from './views/dashboard';
+import { DetailPanelManager } from './views/detail-panel';
 import { DashboardBridge } from './dashboard/bridge';
 import { ScannerController } from './dashboard/scanner-controller';
 import { FOCUS_DASHBOARD_COMMAND, StatusBarManager } from './dashboard/status-bar';
+import { CompletionNotifier } from './dashboard/completion-notifier';
+import type { DashboardEventToExtension } from './shared/dashboard-protocol';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -170,6 +173,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   context.subscriptions.push(focusDashboardCmd);
 
+  // === Detail panel (editor tab) ===
+  // Abre on-demand cuando el user clickea el body de una card del
+  // sidebar (event `request_show_detail`). Single-instance: si ya
+  // hay panel abierto para otro agente, el manager lo dispose y
+  // crea uno nuevo para el agentId actual.
+  const detailPanel = new DetailPanelManager(
+    context.extensionUri,
+    bridge,
+    channel,
+    (msg) => scanner.handleMessage(msg),
+  );
+  context.subscriptions.push(detailPanel);
+
+  // === Completion notifier ===
+  // Toast VS Code "Agent X finished" cuando un agente termina.
+  // Click "Open detail" → abre el detail panel para ese agente.
+  // Opt-out via setting `claudeOrchestrator.notifyOnComplete`.
+  const completionNotifier = new CompletionNotifier({
+    bridge,
+    channel,
+    showDetail: (agentId, name) => detailPanel.showForAgent(agentId, name),
+  });
+  context.subscriptions.push(completionNotifier);
+
+  // === Handler webview→ext del `request_show_detail` ===
+  // Lo separamos del scanner-controller porque el manager del
+  // detail panel vive en views/, no en dashboard/. Wireamos un
+  // proxy del scanner.handleMessage que intercepta el show_detail
+  // y delega el resto al scanner.
+  const handleWebviewMessage = (msg: DashboardEventToExtension): void => {
+    if (msg.type === 'request_show_detail') {
+      const meta = bridge.getResumeTarget(msg.agentId);
+      const name = meta?.name ?? msg.agentId.slice(0, 8);
+      detailPanel.showForAgent(msg.agentId, name);
+      return;
+    }
+    scanner.handleMessage(msg);
+  };
+
   // === Dashboard webview (sidebar) ===
   // Registramos el provider que VS Code instancia cuando el user abre
   // el Activity Bar de Claude Orchestrator. retainContextWhenHidden
@@ -179,7 +221,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const dashboardProvider = new DashboardViewProvider(
     context.extensionUri,
     bridge,
-    (msg) => scanner.handleMessage(msg),
+    handleWebviewMessage,
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

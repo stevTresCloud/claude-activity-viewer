@@ -26,6 +26,7 @@ import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
 import { useNow } from '../../composables/useNow';
+import { useShowDetail } from '../../composables/useShowDetail';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -34,6 +35,13 @@ import AgentActionRow from './AgentActionRow.vue';
 const props = defineProps<{
   agent: Agent;
 }>();
+
+// Click en el body de la card (no en botones de AgentActionRow,
+// que llevan @click.stop) abre el detail panel en un editor tab.
+const detail = useShowDetail();
+function onBodyClick(): void {
+  detail.show(props.agent.id);
+}
 
 // === Format derivado ===
 //
@@ -55,7 +63,15 @@ const elapsedText = computed(() => {
 </script>
 
 <template>
-  <div class="card">
+  <div
+    class="card"
+    role="button"
+    :aria-label="`Open ${agent.name} detail view`"
+    tabindex="0"
+    @click="onBodyClick"
+    @keydown.enter="onBodyClick"
+    @keydown.space.prevent="onBodyClick"
+  >
     <!-- === L1: dot + name + model + elapsed === -->
     <div class="line line-1">
       <StatusDot status="running" pulse />
@@ -73,7 +89,7 @@ const elapsedText = computed(() => {
 
     <!-- === L3: context bar === -->
     <div v-if="agent.contextUsedPct !== undefined" class="line indented">
-      <ContextBar :pct="agent.contextUsedPct" :tokens-used="agent.tokensUsed" />
+      <ContextBar :pct="agent.contextUsedPct" :context-tokens="agent.contextTokens" />
     </div>
 
     <!-- === L4: actions + sweeping progress bar inline ===
@@ -102,6 +118,16 @@ const elapsedText = computed(() => {
   /* Alinea el stripe con el borde interno del container del project
    * group, que tiene padding-left 10px. */
   margin-left: -2px;
+  /* Click-through al detail panel. Cursor pointer en toda la card
+   * excepto los botones de AgentActionRow (que llevan @click.stop). */
+  cursor: pointer;
+}
+.card:hover {
+  background: rgb(127 127 127 / 0.04);
+}
+.card:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
 }
 
 .line {

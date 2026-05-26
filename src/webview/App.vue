@@ -25,21 +25,31 @@
 
 import { useProjectFilter } from './composables/useProjectFilter';
 import { useDashboardBridge } from './composables/useDashboardBridge';
+import { useDetailMode } from './composables/useDetailMode';
 import { useAgentsStore } from './stores/useAgentsStore';
 import Toolbar from './components/Toolbar.vue';
 import AllProjectsView from './views/AllProjectsView.vue';
 import SingleProjectView from './views/SingleProjectView.vue';
+import AgentDetailView from './views/AgentDetailView.vue';
 
+const detail = useDetailMode();
 const { selectedProjectId } = useProjectFilter();
 const store = useAgentsStore();
 
 // Wire del adapter postMessage → store. Hace addEventListener al
-// mount, cleanup al unmount.
+// mount, cleanup al unmount. Aplica en ambos modos (sidebar y
+// detail) porque ambos webviews reciben los mismos eventos del
+// bridge y necesitan poblar el mismo store local.
 useDashboardBridge();
 </script>
 
 <template>
-  <main class="container">
+  <!-- Detail mode: editor tab abierto on-demand, renderea SOLO el
+       AgentDetailView. No mostramos toolbar ni cards aquí. -->
+  <AgentDetailView v-if="detail.mode === 'detail'" />
+
+  <!-- Sidebar mode (default): dashboard completo. -->
+  <main v-else class="container">
     <Toolbar />
     <div v-if="store.totalCount === 0" class="empty-state">
       <p class="empty-title">No agents yet.</p>

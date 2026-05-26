@@ -335,6 +335,14 @@ export class ScannerController {
       case 'request_open':
         void this.openLiveAgent(msg.agentId);
         break;
+      // NO manejamos `request_hydrate_logs` acá: el detail panel
+      // (views/detail-panel.ts) lo intercepta antes de llegar al
+      // scanner-controller y llama `bridge.hydrateLogs(id, panel.webview)`
+      // con su propio webview como target — eso evita serializar
+      // el ringbuffer (hasta 1000 entries) al sidebar que no lo usa.
+      // Si en el futuro un componente del sidebar necesita hidratar,
+      // que cablee su propio target explícito; un pass-through acá
+      // broadcast-earía a todos los webviews innecesariamente.
       default:
         // Otros tipos (send_message): ignorados acá.
         break;

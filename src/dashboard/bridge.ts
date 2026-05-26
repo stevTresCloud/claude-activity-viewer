@@ -34,23 +34,27 @@ import * as vscode from 'vscode';
 import type { AgentRunner } from '../runtime/agent-runner';
 import {
   DEFAULT_MODEL,
+  MODEL_ALIASES,
   type AgentEvent,
   type AgentStatus as RuntimeAgentStatus,
   type ModelAlias,
 } from '../runtime/types';
 import { logAgentEvent, ts } from '../runtime/log';
-import type {
-  AgentCompletedResult,
-  AgentSnapshot,
-  AgentStatus,
-  DashboardEventToWebview,
-  LogEntry,
+import { capitalize } from '../shared/format';
+import {
+  LOG_RING_MAX,
+  type AgentCompletedResult,
+  type AgentSnapshot,
+  type AgentStatus,
+  type DashboardEventToWebview,
+  type LogEntry,
 } from '../shared/dashboard-protocol';
 
 // === Constantes ===
 
 const STATE_KEY = 'claudeOrchestrator.agents';
-const LOG_RING_MAX = 1000;
+// LOG_RING_MAX vive en shared/dashboard-protocol.ts — bridge y store
+// del webview lo respetan en paralelo (importan desde el mismo lugar).
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;       // 30 días
 const PERSIST_DEBOUNCE_MS = 500;
 /**
@@ -109,6 +113,20 @@ export interface SpawnOutput {
   finished: Promise<void>;
 }
 
+/**
+ * Payload del listener `onAgentCompleted`. Se dispara una sola vez
+ * por agente, en el bloque terminal del run. Lo consumen
+ * post-completion hooks (toast notification, analytics futura).
+ */
+export interface AgentCompletionEvent {
+  agentId: string;
+  name: string;
+  status: 'done' | 'failed' | 'cancelled';
+  durationMs: number;
+  tokensUsed: number;
+  reason?: string;
+}
+
 // === Bridge ===
 
 export interface DashboardBridgeOptions {
@@ -138,10 +156,13 @@ export class DashboardBridge {
   // como huérfanos (failed/ide_restart) en vez de cancelled.
   private readonly activeRuns = new Set<Promise<void>>();
 
-  // Webview vivo, si hay uno attached. Null mientras el sidebar
-  // está cerrado / no resuelto. Cuando se reattachea, hidratamos
-  // con agent_list completo.
-  private webview: vscode.Webview | null = null;
+  // Webviews vivos attached. Hoy hay potencialmente dos:
+  //   1. Sidebar (DashboardViewProvider).
+  //   2. Detail panel (editor tab, abierto on-demand).
+  // El bridge broadcastea todos los eventos a TODOS los webviews
+  // attached; cada webview filtra del lado Vue lo que le interesa.
+  // El set permite attach/detach independientes sin perder al otro.
+  private readonly webviews = new Set<vscode.Webview>();
 
   // Callbacks invocados después de cada `attachWebview`. Los usa
   // el scanner-controller para re-emitir su último resultado: sin
@@ -154,6 +175,13 @@ export class DashboardBridge {
   // suscripción/de-suscripción es rara (1 por activación de la
   // extension); no vale la pena un Set.
   private readonly runningCountListeners: Array<(count: number) => void> = [];
+
+  // Listeners de "agente entró en estado terminal". Lo consume el
+  // CompletionNotifier (toast VS Code). Mismo patrón que
+  // runningCountListeners — 1 listener fijo por activación, array OK.
+  private readonly completionListeners: Array<
+    (event: AgentCompletionEvent) => void
+  > = [];
 
   // Persistencia debounced: cada evento agenda un flush, sucesivos
   // mientras el timer corre se colapsan en uno solo. Sin esto, un
@@ -239,12 +267,15 @@ export class DashboardBridge {
    * cuando el view migra entre sidebars).
    */
   attachWebview(webview: vscode.Webview): vscode.Webview {
-    this.webview = webview;
+    this.webviews.add(webview);
     const agents = this.snapshotList();
     this.channel.appendLine(
-      `[${ts()}] [bridge] webview attached, hydrating ${agents.length} agents`,
+      `[${ts()}] [bridge] webview attached (total=${this.webviews.size}), hydrating ${agents.length} agents`,
     );
-    this.post({ type: 'agent_list', agents });
+    // Hidratamos SOLO al webview nuevo, no broadcast. Los otros
+    // webviews ya tienen su state y no deben recibir un agent_list
+    // que les fuerce un applyAgentList que vacía sus logs.
+    webview.postMessage({ type: 'agent_list', agents });
     // Notificamos a los suscriptores (scanner-controller) para que
     // re-emitan su último cache al webview. Fire-and-forget; un
     // callback que tire no debe romper attach.
@@ -276,14 +307,16 @@ export class DashboardBridge {
   }
 
   /**
-   * Disposable: VS Code cierra el webview, soltamos la referencia
-   * SOLO si seguimos apuntando al mismo. Si un attach posterior
-   * ya pisó la referencia (porque el view migró), no toquemos: el
-   * webview vigente es el nuevo.
+   * Disposable: VS Code cierra un webview, lo sacamos del set.
+   * Idempotente — si el token ya no estaba (porque otro detach corrió
+   * primero, o el set se limpió por dispose() del bridge), el delete
+   * es no-op. Los otros webviews attached siguen recibiendo eventos.
    */
   detachWebview(token: vscode.Webview): void {
-    if (this.webview === token) {
-      this.webview = null;
+    if (this.webviews.delete(token)) {
+      this.channel.appendLine(
+        `[${ts()}] [bridge] webview detached (total=${this.webviews.size})`,
+      );
     }
   }
 
@@ -312,10 +345,13 @@ export class DashboardBridge {
     );
 
     const startedAtIso = new Date().toISOString();
-    // Modelo inicial: el alias que el caller pidió (o
-    // DEFAULT_MODEL). Se sobreescribe con la versión real cuando el
-    // SDK emita el init message (AgentEvent type='model').
-    const requestedModel = input.model ?? DEFAULT_MODEL;
+    // Modelo inicial: prioridad
+    //   1. input.model (lo que el caller pidió explícito en el MCP).
+    //   2. setting `claudeOrchestrator.defaultModel` del user.
+    //   3. DEFAULT_MODEL (hardcoded fallback 'sonnet').
+    // El badge se sobrescribe con el id real cuando el SDK emita el
+    // init message (AgentEvent type='model').
+    const requestedModel = input.model ?? this.getDefaultModel();
     const snapshot: AgentSnapshot = {
       id: agentId,
       name,
@@ -354,7 +390,13 @@ export class DashboardBridge {
     // === Run en background ===
     // No await acá: el caller puede observar via `finished` si le
     // interesa, pero la respuesta del MCP retorna inmediato.
-    const finished = this.run(agentId, input, abort.signal).catch((err) => {
+    //
+    // Pasamos `requestedModel` resuelto (que ya aplicó el fallback
+    // del setting) al runner. Sin esto, el runner recibe
+    // `input.model` undefined y cae a su propio DEFAULT_MODEL,
+    // ignorando el setting `claudeOrchestrator.defaultModel`.
+    const resolvedInput: SpawnInput = { ...input, model: requestedModel };
+    const finished = this.run(agentId, resolvedInput, abort.signal).catch((err) => {
       // Defensivo: el runner ya captura sus errores; solo entraría
       // acá si el dynamic import del SDK falla catastrófico.
       this.channel.appendLine(
@@ -415,6 +457,83 @@ export class DashboardBridge {
   }
 
   /**
+   * Lista plana de todos los agentes en el registry (vivos +
+   * terminados que sobrevivieron al TTL del globalState). Lo
+   * consume el handler MCP `list_agents` para que un chat externo
+   * pueda preguntar "qué agentes tengo, en qué estado están".
+   *
+   * Retorna shallow copies del `AgentSnapshot` — el caller no debe
+   * mutar el registry interno. Orden: insertion-order (los más
+   * viejos primero).
+   */
+  listAgents(): AgentSnapshot[] {
+    return Array.from(this.agents.values()).map((s) => ({ ...s.snapshot }));
+  }
+
+  /**
+   * Devuelve el ringbuffer completo de logs del agente o null si
+   * el agentId no existe. Si `since` viene, filtra entries con
+   * `ts > since` (útil para paginación incremental: el MCP client
+   * guarda el `ts` del último entry recibido y pide el delta).
+   *
+   * El consumidor del MCP `get_agent_log` lo usa para devolver
+   * batches al chat externo sin mandar el ringbuffer entero cada
+   * vez.
+   */
+  getAgentLog(
+    agentId: string,
+    since?: number,
+  ): { entries: LogEntry[] } | null {
+    const stored = this.agents.get(agentId);
+    if (!stored) return null;
+    let entries = stored.log;
+    if (typeof since === 'number' && Number.isFinite(since)) {
+      entries = entries.filter((e) => e.ts > since);
+    }
+    // Shallow copy para evitar que el caller mute el ringbuffer
+    // interno (los LogEntry son objetos simples sin nesting).
+    return { entries: entries.slice() };
+  }
+
+  /**
+   * Emite el ringbuffer completo de logs de un agente como un único
+   * `agent_log_history`. Llamado on-demand cuando el detail panel
+   * (editor tab) se monta y necesita hidratar el LogStream con todo
+   * el histórico antes de empezar a appendear entries nuevos del
+   * canal `agent_log`.
+   *
+   * Por qué un solo evento batch en vez de re-emitir N×`agent_log`:
+   *   Un agente con 1000 entries dispararía 1000 round-trips
+   *   postMessage entre extension host y webview, cada uno
+   *   serializa + cruza el IPC. Con el batch, es un solo cruce.
+   *
+   * Si el webview que pidió la hidratación se conoce (por ej. el
+   * `onDidReceiveMessage` de un panel sabe su propio webview), se
+   * pasa como `targetWebview` y el evento va SOLO a ese. Sin el
+   * target, broadcast a todos los webviews — patrón fallback.
+   * El target evita serializar 1000 entries para el sidebar que no
+   * los usa.
+   *
+   * No-op silencioso si el agentId no existe (el panel del webview
+   * puede haber sido abierto contra un agente que ya fue evictado
+   * por TTL). En ese caso emitimos `entries: []` para que el panel
+   * pueda mostrar empty state coherente.
+   */
+  hydrateLogs(agentId: string, targetWebview?: vscode.Webview): void {
+    const stored = this.agents.get(agentId);
+    const entries = stored ? [...stored.log] : [];
+    this.channel.appendLine(
+      `[${ts()}] [bridge] hydrate logs agent=${agentId.slice(0, 8)} entries=${entries.length}`,
+    );
+    const event = { type: 'agent_log_history' as const, agentId, entries };
+    if (targetWebview) {
+      targetWebview.postMessage(event);
+    } else {
+      this.post(event);
+    }
+  }
+
+  /**
    * Suscripción al cambio de cantidad de agentes en estado
    * `running`. El status bar item se actualiza con cada delta. El
    * callback recibe el count actual y se invoca SYNC tras cada
@@ -457,6 +576,39 @@ export class DashboardBridge {
     }
   }
 
+  /**
+   * Suscripción a "agente entró en estado terminal". El listener
+   * recibe `{agentId, name, status, durationMs, tokensUsed,
+   * reason?}` exactamente UNA vez por agente, justo después de que
+   * el bridge mutó el snapshot al estado terminal. El CompletionNotifier
+   * lo usa para mostrar el toast VS Code; otros consumidores
+   * podrían loggear analytics, sound alerts, etc.
+   *
+   * No re-emite eventos pasados al suscribirse (vs onRunningCountChange
+   * que sí emite el count actual). Si el caller quiere el historial,
+   * debe usar `listAgents()` + filtrar por status terminal.
+   */
+  onAgentCompleted(cb: (event: AgentCompletionEvent) => void): () => void {
+    this.completionListeners.push(cb);
+    return () => {
+      const i = this.completionListeners.indexOf(cb);
+      if (i >= 0) this.completionListeners.splice(i, 1);
+    };
+  }
+
+  private notifyCompletion(event: AgentCompletionEvent): void {
+    if (this.completionListeners.length === 0) return;
+    for (const cb of this.completionListeners) {
+      try {
+        cb(event);
+      } catch (err) {
+        this.channel.appendLine(
+          `[${ts()}] [bridge] completion listener error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   // ====================================================================
   // === Runner integration =============================================
   // ====================================================================
@@ -477,6 +629,7 @@ export class DashboardBridge {
     let lastTool: string | undefined;
     let lastSubtitle: string | undefined;
     let lastTokensUsed = 0;
+    let lastContextTokens = 0;
     let lastContextPct = 0;
 
     try {
@@ -518,13 +671,37 @@ export class DashboardBridge {
           }
 
           if (event.type === 'usage') {
+            // `tokensUsed` (UI badge en RECENT + completion toast)
+            // = costo billable del turno = input nuevo + output. NO
+            // incluye cache porque cache reads se pagan a tarifa
+            // reducida y la UI muestra "lo que consumiste de nuevo".
             lastTokensUsed = event.inputTokens + event.outputTokens;
+
+            // `contextTokens` (numerador de la barra) y
+            // `contextUsedPct` (porcentaje) miden cuánto del
+            // context window de 200k está cargado AHORA. El SDK
+            // reporta `input_tokens` como solo el delta nuevo del
+            // turn; el contexto histórico viaja por cache. Suma:
+            //   input_tokens         (delta nuevo del turn)
+            //   cache_read_tokens    (contexto previo leído del cache)
+            //   cache_creation_tokens (contexto nuevo escrito al cache)
+            // Sin sumar los dos cache campos, la ContextBar queda
+            // en ~0% durante el run porque casi todo es cache.
+            //
+            // Mantenemos `tokensUsed` y `contextTokens` como dos
+            // campos distintos para que la fracción visible de la
+            // barra (`contextTokens / 200k`) sea coherente con el
+            // porcentaje. Mezclar ambos como antes daba `0k / 200k
+            // · 60%` — matemáticamente incoherente.
+            lastContextTokens =
+              event.inputTokens + event.cacheReadTokens + event.cacheCreationTokens;
             lastContextPct = Math.min(
               100,
-              Math.round((event.inputTokens / CONTEXT_WINDOW_TOKENS) * 100),
+              Math.round((lastContextTokens / CONTEXT_WINDOW_TOKENS) * 100),
             );
             this.emitStatusChange(agentId, 'running', {
               tokensUsed: lastTokensUsed,
+              contextTokens: lastContextTokens,
               contextUsedPct: lastContextPct,
             });
             return;
@@ -567,6 +744,7 @@ export class DashboardBridge {
         stored.snapshot.completedAtIso = completedAtIso;
         stored.snapshot.durationMs = result.durationMs;
         stored.snapshot.tokensUsed = lastTokensUsed || result.inputTokens + result.outputTokens;
+        stored.snapshot.contextTokens = lastContextTokens;
         stored.snapshot.contextUsedPct = lastContextPct;
         stored.snapshot.currentTool = lastTool;
         stored.snapshot.subtitle = lastSubtitle;
@@ -582,6 +760,22 @@ export class DashboardBridge {
         reason: stored?.snapshot.reason,
       };
       this.post({ type: 'agent_completed', agentId, result: completedResult });
+
+      // Notificamos a los listeners post-completion (toast VS Code,
+      // analytics futura). El payload se arma con el state ya mutado
+      // arriba; en caso de que stored sea undefined (improbable —
+      // si llegamos al bloque terminal el agentId existe en agents),
+      // omitimos la notificación.
+      if (stored && (wireStatus === 'done' || wireStatus === 'failed' || wireStatus === 'cancelled')) {
+        this.notifyCompletion({
+          agentId,
+          name: stored.snapshot.name,
+          status: wireStatus,
+          durationMs: result.durationMs,
+          tokensUsed: completedResult.tokensUsed,
+          reason: stored.snapshot.reason,
+        });
+      }
     } finally {
       this.aborts.delete(agentId);
       this.schedulePersist();
@@ -655,12 +849,16 @@ export class DashboardBridge {
     this.schedulePersist();
   }
 
-  /** Post al webview si está attached. Si no, evento perdido (no hay queue). */
+  /**
+   * Broadcast a TODOS los webviews attached. Si no hay ninguno, el
+   * evento se descarta (no hay queue interna). postMessage es
+   * fire-and-forget; si un webview murió en medio del frame, VS Code
+   * lo absorbe sin tirar.
+   */
   private post(event: DashboardEventToWebview): void {
-    if (!this.webview) return;
-    // postMessage es fire-and-forget; si el webview murió en medio
-    // del frame, VS Code lo absorbe sin tirar.
-    this.webview.postMessage(event);
+    for (const w of this.webviews) {
+      w.postMessage(event);
+    }
   }
 
   /**
@@ -755,15 +953,29 @@ export class DashboardBridge {
     // Expandir ~ y normalizar; usuarios pueden poner "~/git19/docs".
     return raw.map((p) => expandUserHome(p));
   }
+
+  /**
+   * Lee `claudeOrchestrator.defaultModel` con guard a `DEFAULT_MODEL`.
+   * Aplica cuando el caller del bridge (palette command o MCP) NO
+   * especifica un modelo explícito en `SpawnInput.model`.
+   *
+   * El setting está restringido a `MODEL_ALIASES` por el enum del
+   * schema, pero un user puede haber guardado un valor obsoleto
+   * (ej. alias renombrado en una versión futura del SDK). El guard
+   * defensivo evita que un setting basura le rompa el spawn.
+   */
+  private getDefaultModel(): ModelAlias {
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const raw = cfg.get<string>('defaultModel', DEFAULT_MODEL);
+    return (MODEL_ALIASES as readonly string[]).includes(raw)
+      ? (raw as ModelAlias)
+      : DEFAULT_MODEL;
+  }
 }
 
 // ====================================================================
 // === Helpers de módulo (exportables para tests futuros) =============
 // ====================================================================
-
-function capitalize(s: string): string {
-  return s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s;
-}
 
 /**
  * Convierte el id de modelo crudo del SDK a un label legible para

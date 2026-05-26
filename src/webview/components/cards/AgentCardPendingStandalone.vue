@@ -20,6 +20,7 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatRelative } from '../../utils/format';
+import { useShowDetail } from '../../composables/useShowDetail';
 import PriorityPill from '../atoms/PriorityPill.vue';
 
 const props = defineProps<{
@@ -29,10 +30,23 @@ const props = defineProps<{
 }>();
 
 const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
+
+const detail = useShowDetail();
+function onBodyClick(): void {
+  detail.show(props.agent.id);
+}
 </script>
 
 <template>
-  <div class="card">
+  <div
+    class="card"
+    role="button"
+    :aria-label="`Open ${agent.name} detail view`"
+    tabindex="0"
+    @click="onBodyClick"
+    @keydown.enter="onBodyClick"
+    @keydown.space.prevent="onBodyClick"
+  >
     <span class="index">{{ index }}</span>
 
     <!-- === Content column — name + model apilados === -->
@@ -56,6 +70,15 @@ const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
   border-left: 3px solid var(--stripe-pending);
   border-radius: 6px;
   padding: 8px 10px;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+.card:hover {
+  background: rgb(127 127 127 / 0.06);
+}
+.card:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
 }
 
 /* === Index badge — 20×20 (más grande que el compact 18×18) === */

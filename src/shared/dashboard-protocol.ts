@@ -21,6 +21,17 @@
  * eventos extension→webview + 3 webview→extension).
  * ================================================================ */
 
+// === Constantes compartidas ===
+
+/**
+ * Capacidad del ringbuffer per-agent del log streaming. Bridge y
+ * store del webview lo respetan en paralelo: el bridge para el
+ * persisted log (globalState), el store para la copia in-memory
+ * del webview. Mantener UN solo valor canónico evita drifts cuando
+ * uno se actualiza y el otro no.
+ */
+export const LOG_RING_MAX = 1000;
+
 // === Unions atómicos ===
 
 /**
@@ -100,6 +111,19 @@ export interface AgentSnapshot {
   elapsedMs?: number;
   /** % del context window usado (0-100). */
   contextUsedPct?: number;
+  /**
+   * Tokens cargados en el context window activo del modelo. Suma
+   * input + cacheRead + cacheCreation. Coincide matemáticamente
+   * con `contextUsedPct` (= contextTokens / 200_000 * 100). El
+   * ContextBar lo usa como numerador de la fracción "Xk / 200k".
+   *
+   * Distinto de `tokensUsed` que mide el COSTO billable del turno
+   * (sin cache, ~10× más chico). Coexisten porque la UI muestra
+   * cosas distintas: la barra quiere "cuánto del context se llenó"
+   * (incluye cache), las cards RECENT quieren "cuánto consumió"
+   * (sin cache, costo efectivo).
+   */
+  contextTokens?: number;
   currentTool?: string;
   tokensUsed?: number;
 
@@ -210,7 +234,15 @@ export type DashboardEventToWebview =
    * leídas de `~/.claude/projects/<encoded-cwd>/*.jsonl`. El webview
    * las deduplica contra agentes vivos por sessionId+entrypoint.
    */
-  | { type: 'sessions_from_disk'; sessions: SessionFromDisk[]; scannedAtIso: string };
+  | { type: 'sessions_from_disk'; sessions: SessionFromDisk[]; scannedAtIso: string }
+  /**
+   * Hidratación on-demand del ringbuffer de logs de un agente. Lo
+   * emite el bridge cuando el detail panel (editor tab) lo solicita
+   * via `request_hydrate_logs`. Lleva TODOS los entries del
+   * ringbuffer del bridge en un solo evento (vs N×agent_log) — para
+   * un agente con 1000 entries, esto es ~1 frame en vez de 1000.
+   */
+  | { type: 'agent_log_history'; agentId: string; entries: LogEntry[] };
 
 // === Eventos Webview → Extension (declarados, sin handler todavía) ===
 
@@ -232,7 +264,21 @@ export type DashboardEventToExtension =
   /** Reanudar una sesión histórica abriendo `claude --resume <id>` en terminal nueva. */
   | { type: 'request_resume_session'; sessionId: string; cwd: string; firstPrompt?: string }
   /** Forzar re-scan inmediato de projects+sessions (botón manual del Toolbar). */
-  | { type: 'request_rescan' };
+  | { type: 'request_rescan' }
+  /**
+   * Pide al bridge que emita el ringbuffer completo de logs del
+   * agente como un único `agent_log_history`. Lo dispara el detail
+   * panel al montar para hidratar el LogStream sin esperar a que
+   * lleguen entries nuevos.
+   */
+  | { type: 'request_hydrate_logs'; agentId: string }
+  /**
+   * Abre (o re-enfoca) el detail panel del agente en un editor tab.
+   * Lo dispara el click en el body de una card del sidebar. El
+   * DetailPanelManager del extension host crea el WebviewPanel y le
+   * inyecta `window.__claudeOrchestrator.agentId`.
+   */
+  | { type: 'request_show_detail'; agentId: string };
 
 // === Entidades para los scanners (filesystem-derived) ===
 

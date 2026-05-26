@@ -190,6 +190,35 @@ export class AgentRunner {
             // de la sesión es la que cuenta).
             const content = event.message.content;
             if (!content) break;
+
+            // === Usage incremental ===
+            // Cada `assistant` message del SDK trae su propio
+            // `message.usage` con input/output/cache tokens del
+            // turno actual. Sin este emit el ContextBar quedaba en
+            // 0% durante todo el run y solo se actualizaba con el
+            // `result` final (que llega cuando el agente termina).
+            // Emitimos el usage del turno; el bridge reemplaza
+            // (no acumula) — semántica "context activo ahora".
+            const msgUsage = event.message.usage;
+            if (msgUsage) {
+              const incIn = msgUsage.input_tokens ?? 0;
+              const incOut = msgUsage.output_tokens ?? 0;
+              if (incIn > 0 || incOut > 0) {
+                config.onEvent({
+                  type: 'usage',
+                  inputTokens: incIn,
+                  outputTokens: incOut,
+                  cacheReadTokens: msgUsage.cache_read_input_tokens ?? 0,
+                  cacheCreationTokens: msgUsage.cache_creation_input_tokens ?? 0,
+                  // El costo total solo viene en el `result` final
+                  // (calculado por el SDK con tarifas vigentes). Mid-run
+                  // dejamos 0; el último `usage` que emite el result lo
+                  // sobreescribe con el valor real.
+                  costUsd: 0,
+                });
+              }
+            }
+
             const messageTexts: string[] = [];
             for (const block of content) {
               if (block.type === 'text' && typeof block.text === 'string') {

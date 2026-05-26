@@ -121,6 +121,45 @@ describe('useAgentsStore — actions', () => {
     expect(store.logsByAgent['a'][999]?.text).toBe('e-1000');
   });
 
+  it('replaceLogsForAgent reemplaza el ringbuffer per-agent con los entries dados', () => {
+    const store = useAgentsStore();
+    // Pre-existente: 3 entries que deben ser pisados por el replace.
+    store.appendLog('a', { ts: 1, kind: 'text', text: 'old-1' });
+    store.appendLog('a', { ts: 2, kind: 'text', text: 'old-2' });
+    store.appendLog('a', { ts: 3, kind: 'text', text: 'old-3' });
+
+    store.replaceLogsForAgent('a', [
+      { ts: 10, kind: 'thinking', text: 'fresh-1' },
+      { ts: 11, kind: 'tool_use', name: 'Read', input: { file: '/x' } },
+    ]);
+
+    expect(store.logsByAgent['a']).toHaveLength(2);
+    expect(store.logsByAgent['a'][0]?.kind).toBe('thinking');
+    expect(store.logsByAgent['a'][1]?.kind).toBe('tool_use');
+  });
+
+  it('replaceLogsForAgent con entries vacíos limpia el log del agente', () => {
+    const store = useAgentsStore();
+    store.appendLog('a', { ts: 1, kind: 'text', text: 'pre' });
+    store.replaceLogsForAgent('a', []);
+    expect(store.logsByAgent['a']).toEqual([]);
+  });
+
+  it('replaceLogsForAgent NO toca el log de otros agentes', () => {
+    const store = useAgentsStore();
+    store.appendLog('a', { ts: 1, kind: 'text', text: 'a-pre' });
+    store.appendLog('b', { ts: 2, kind: 'text', text: 'b-pre' });
+
+    store.replaceLogsForAgent('a', [
+      { ts: 99, kind: 'text', text: 'a-fresh' },
+    ]);
+
+    expect(store.logsByAgent['a']).toHaveLength(1);
+    expect(store.logsByAgent['a'][0]?.text).toBe('a-fresh');
+    expect(store.logsByAgent['b']).toHaveLength(1);
+    expect(store.logsByAgent['b'][0]?.text).toBe('b-pre');
+  });
+
   it('markAgentCompleted setea status final + duration + tokens + reason + completedAtIso si falta', () => {
     const store = useAgentsStore();
     store.addAgent(snap({ id: 'a' }));

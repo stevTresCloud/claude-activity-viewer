@@ -107,3 +107,38 @@ export type SpawnAgentsArgs = {
   }>;
   options?: { project?: string; max_parallel?: number };
 };
+
+// === Input schema del tool `list_agents` ===
+//
+// Sin argumentos. El SDK MCP igual exige el raw shape como objeto;
+// un object vacío indica "tool sin params".
+export const LIST_AGENTS_INPUT_SHAPE = {} as const;
+
+export type ListAgentsArgs = Record<string, never>;
+
+// === Input schema del tool `get_agent_log` ===
+//
+// `agent_id`: requerido. UUID retornado por spawn_agents.
+// `since`: opcional. Epoch ms; filtra entries con `ts > since` para
+//    paginación incremental. Sin `since`, devuelve todo el
+//    ringbuffer (cap 1000 del bridge).
+export const GET_AGENT_LOG_INPUT_SHAPE = {
+  agent_id: z
+    .string()
+    .min(1)
+    .describe('Id del agente devuelto por spawn_agents (UUID).'),
+  since: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Filtrar entries del log con ts > since (epoch ms). Útil para paginar incrementalmente: ' +
+        'el cliente guarda el ts del último entry recibido y pide el delta en la próxima call.',
+    ),
+} as const;
+
+export type GetAgentLogArgs = {
+  agent_id: string;
+  since?: number;
+};

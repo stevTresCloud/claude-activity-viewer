@@ -59,6 +59,12 @@ export function useDashboardBridge(): void {
       case 'agent_log':
         agents.appendLog(data.agentId, data.entry);
         break;
+      case 'agent_log_history':
+        // Llega cuando el detail panel pidió `request_hydrate_logs`
+        // al montarse. Reemplaza el ringbuffer per-agent en el
+        // store (los entries vienen ordenados y bounded del bridge).
+        agents.replaceLogsForAgent(data.agentId, data.entries);
+        break;
       case 'agent_completed':
         agents.markAgentCompleted(data.agentId, data.result);
         break;

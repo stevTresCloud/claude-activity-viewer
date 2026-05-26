@@ -42,10 +42,11 @@ const warningCalls: Array<{
 }> = [];
 
 // Espías de showInformationMessage. Lo necesitan los tests del
-// handler `request_open` (toast "Session not started yet") y del
-// fallback chat→terminal de `resumeSession` (no cubierto por tests
-// hoy pero el mock queda disponible para futuras suites).
-const infoCalls: Array<{ message: string }> = [];
+// handler `request_open` (toast "Session not started yet"), del
+// fallback chat→terminal de `resumeSession` y del CompletionNotifier
+// (toast "agent finished" con botón "Open detail").
+let infoChoice: string | undefined = undefined;
+const infoCalls: Array<{ message: string; items: string[] }> = [];
 
 // Comandos ejecutados via vscode.commands.executeCommand. El
 // handler `request_open` invoca `vscode.open` con un Uri y los
@@ -115,9 +116,12 @@ export const window = {
     warningCalls.push({ message, options, items });
     return Promise.resolve(warningChoice);
   },
-  showInformationMessage(message: string): Promise<undefined> {
-    infoCalls.push({ message });
-    return Promise.resolve(undefined);
+  showInformationMessage(
+    message: string,
+    ...items: string[]
+  ): Promise<string | undefined> {
+    infoCalls.push({ message, items });
+    return Promise.resolve(infoChoice);
   },
   showErrorMessage(message: string): Promise<undefined> {
     // No tracked todavía — los tests actuales no asertan errores.
@@ -208,6 +212,11 @@ export function __setWarningChoice(choice: string | undefined): void {
   warningChoice = choice;
 }
 
+/** Setea qué string devuelve el próximo `showInformationMessage`. */
+export function __setInfoChoice(choice: string | undefined): void {
+  infoChoice = choice;
+}
+
 /** Lista de llamadas a `showWarningMessage` desde el último reset. */
 export function __getWarningCalls(): ReadonlyArray<{
   message: string;
@@ -218,7 +227,7 @@ export function __getWarningCalls(): ReadonlyArray<{
 }
 
 /** Llamadas a `showInformationMessage` desde el último reset. */
-export function __getInfoCalls(): ReadonlyArray<{ message: string }> {
+export function __getInfoCalls(): ReadonlyArray<{ message: string; items: string[] }> {
   return infoCalls;
 }
 
@@ -250,6 +259,7 @@ export function __resetVscode(): void {
   workspaceFoldersValue = undefined;
   warningChoice = undefined;
   warningCalls.length = 0;
+  infoChoice = undefined;
   infoCalls.length = 0;
   executedCommands.length = 0;
   statusBarItems.length = 0;
