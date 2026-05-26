@@ -47,7 +47,7 @@ const queuedAgo = computed(() =>
   align-items: center;
   gap: 8px;
   /* Stripe 3px amarilla (pending). */
-  border-left: 3px solid var(--color-warning);
+  border-left: 3px solid var(--stripe-pending);
   padding-left: 9px;
   margin-left: -2px;
 }
@@ -59,7 +59,7 @@ const queuedAgo = computed(() =>
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #0f0f0f;
+  background: var(--background-index-badge);
   border: 1px solid var(--border-subtle);
   border-radius: 3px;
   font-size: 10px;

@@ -19,11 +19,18 @@
 import { computed } from 'vue';
 import type { AgentStatus, ProjectLifecycle } from '../../types';
 
-type DotKind = AgentStatus | ProjectLifecycle;
+/**
+ * Kinds que el dot acepta:
+ *   - status de agentes (running, done, failed, cancelled, pending)
+ *   - lifecycle de proyectos (active, idle, inactive)
+ *   - 'neutral': filled muted sin semántica fuerte. Se usa para el
+ *     row "All projects" del selector (no es un proyecto con
+ *     lifecycle, es la opción meta de "ver todos").
+ */
+type DotKind = AgentStatus | ProjectLifecycle | 'neutral';
 
 const props = withDefaults(
   defineProps<{
-    /** Estado del agente o lifecycle del proyecto. */
     status: DotKind;
     /** Si true, anima con pulse + halo. Solo aplica a kinds filled. */
     pulse?: boolean;
@@ -51,22 +58,11 @@ const dotColor = computed(() => {
     case 'cancelled':
     case 'idle':
     case 'inactive':
+    case 'neutral':
       return 'var(--color-muted)';
     default:
       return 'var(--color-muted)';
   }
-});
-
-/**
- * Halo del pulse — derivado del color del dot con alpha. Si en el
- * futuro queremos otros halos (warning halo para pending dots
- * animados, por ejemplo) este `computed` se extiende.
- */
-const haloColor = computed(() => {
-  // Hardcoded a la versión success para el único caso pulse de
-  // ahora (NOW PLAYING running dot). En 1.3.c si hay pulse para
-  // otros estados se generaliza.
-  return 'rgb(76 175 80 / 0.3)';
 });
 </script>
 
@@ -77,7 +73,8 @@ const haloColor = computed(() => {
     :style="{
       background: isRing ? 'transparent' : dotColor,
       border: isRing ? `1.5px solid ${dotColor}` : 'none',
-      boxShadow: pulse && !isRing ? `0 0 0 3px ${haloColor}` : 'none',
+      boxShadow:
+        pulse && !isRing ? '0 0 0 3px var(--color-pulse-halo)' : 'none',
     }"
     :aria-label="`status ${status}`"
   />

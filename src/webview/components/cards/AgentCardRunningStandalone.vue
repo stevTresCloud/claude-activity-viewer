@@ -1,28 +1,30 @@
 <script setup lang="ts">
 /**
- * AgentCardRunning — variante "dentro de project group" (HANDOFF
- * §2.8.1). Sin background propio: la card padre (ProjectGroup) trae
- * el bg y border; aquí solo aportamos:
+ * AgentCardRunningStandalone — variante "card propio" del running
+ * agent card, usada en la vista Single project (sin project group
+ * container que lo envuelva).
  *
- *   - stripe 3px azul (running) a la izquierda
- *   - 4 líneas verticales:
- *       L1: dot pulse + name + ModelBadge + elapsed
- *       L2: subtitle · current_tool
- *       L3: ContextBar
- *       L4: 3 botones decorativos + sweeping progress bar
+ * Diferencias con AgentCardRunning (HANDOFF §2.8.2):
  *
- * El `margin-left: -2px` alinea el stripe con el borde izquierdo del
- * container del project group (que tiene padding 10px). Sin el
- * margin, la stripe queda 2px adentro y se nota un escalón.
+ *   - Lleva su propio background + border + border-radius 6px (el
+ *     hermano hereda eso del container del project group).
+ *   - El border-left 3px running ahora vive en el container padre,
+ *     no en cada line.
+ *   - El sweeping progress bar va `position: absolute` full-width
+ *     abajo del card (no inline en el row de actions). Cubre todo
+ *     el ancho del card, dándole un sentido visual más fuerte de
+ *     "este card está procesando".
+ *   - Padding 12px para que las 4 líneas respiren más sin el
+ *     padding del container.
  *
- * Los botones son decorativos por ahora; los handlers se cablean
- * cuando la extensión y el webview hablen via postMessage.
+ * Las 4 líneas internas son idénticas al hermano y reusan los
+ * mismos átomos (StatusDot pulse, ModelBadge, ContextBar) — solo
+ * el wrapper cambia. La decisión de NO parametrizar con un prop
+ * `standalone` boolean en AgentCardRunning fue para evitar un
+ * componente con 4 estilos en cascada según un boolean — lee mejor
+ * tener dos archivos pequeños con scope claro.
  *
- * La variante "standalone" (vista Single project) existe como
- * componente separado en `AgentCardRunningStandalone.vue` para no
- * inflar este con un prop boolean que cambia 4 estilos.
- *
- * Referencia: HANDOFF.md §2.8.1.
+ * Referencia: HANDOFF.md §2.8.2.
  */
 
 import { computed } from 'vue';
@@ -35,8 +37,6 @@ import ModelBadge from '../atoms/ModelBadge.vue';
 const props = defineProps<{
   agent: Agent;
 }>();
-
-// === Format derivado ===
 
 const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
 </script>
@@ -63,7 +63,7 @@ const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
       <ContextBar :pct="agent.contextUsedPct" :tokens-used="agent.tokensUsed" />
     </div>
 
-    <!-- === L4: actions inline + sweeping progress bar === -->
+    <!-- === L4: actions inline (sin sweep bar inline; va abajo absolute) === -->
     <div class="line indented actions">
       <button type="button" class="action" aria-label="pause">
         <i class="codicon codicon-debug-pause" />
@@ -74,27 +74,32 @@ const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
       <button type="button" class="action" aria-label="open">
         <i class="codicon codicon-link-external" />
       </button>
-      <div class="progress-track">
-        <div class="progress-bar sweep-bar" />
-      </div>
+    </div>
+
+    <!-- === Sweep bar full-width pegado al borde inferior del card === -->
+    <div class="sweep-track">
+      <div class="sweep-bar" />
     </div>
   </div>
 </template>
 
 <style scoped>
-/* === Container — stripe izquierda + verticals === */
+/* === Card padre — bg + border + radius + stripe izquierda === */
 .card {
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  /* Stripe 3px de status — color hardcoded a running porque este
-   * componente solo se usa para running. */
+  background: var(--background-card);
+  border: 1px solid var(--border-subtle);
+  /* La stripe vive en el border-left del card; los hijos NO la
+   * llevan repetida como en la variante "dentro de project group". */
   border-left: 3px solid var(--stripe-running);
-  padding-left: 9px;
-  /* Alinea el stripe con el borde interno del container del project
-   * group, que tiene padding-left 10px. */
-  margin-left: -2px;
+  border-radius: 6px;
+  padding: 12px;
+  /* overflow:hidden para que el sweep bar no se salga del radius
+   * del card en su esquina inferior. */
+  overflow: hidden;
 }
 
 .line {
@@ -121,13 +126,12 @@ const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
   flex-shrink: 0;
 }
 
-/* === L2/L3/L4 — indent ignorando el dot del L1 ===
- * Dot 7px + gap 6px = 13px, como dice HANDOFF §2.8.1. */
+/* === L2/L3/L4 — indent debajo del dot 7px + gap 6px === */
 .indented {
   padding-left: 13px;
 }
 
-/* === L2 — subtitle muted, tool con foreground destacado === */
+/* === L2 — subtitle muted, tool con foreground === */
 .sub {
   font-size: 11px;
   color: var(--foreground-muted);
@@ -140,7 +144,7 @@ const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
   color: var(--foreground);
 }
 
-/* === L4 — actions + sweeping bar === */
+/* === L4 — actions sin sweep inline === */
 .actions {
   display: flex;
   align-items: center;
@@ -167,26 +171,20 @@ const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
   line-height: 1;
 }
 
-/* Sweeping bar: vive en su propio track de 2px que toma el espacio
- * sobrante del row de actions. El bar interno tiene width 25% y se
- * desplaza con keyframes `sweep` (declarado en style.css). */
-.progress-track {
-  flex: 1;
-  margin-left: 6px;
+/* === Sweep bar full-width pegado abajo del card (HANDOFF §2.8.2) === */
+.sweep-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   height: 2px;
-  border-radius: 1px;
-  background: var(--border-subtle);
   overflow: hidden;
-  position: relative;
 }
-.progress-bar {
+.sweep-bar {
   position: absolute;
   inset: 0;
   width: 25%;
   background: var(--stripe-running);
-  border-radius: 1px;
-}
-.sweep-bar {
   animation: sweep 1.6s ease-in-out infinite;
 }
 </style>

@@ -2,12 +2,12 @@
  * types.ts — Tipos compartidos del webview de Claude Orchestrator.
  *
  * Estos tipos describen el shape de la data que va a vivir en el
- * Pinia store y que consumen los componentes del dashboard. En esta
- * fase la data es mock hardcoded (ver useAgentsStore); en 1.4 cuando
- * llegue postMessage desde la extension, este mismo shape va a
- * llegar serializado por el wire — así que los identificadores
- * usan la convención del backend (snake_case en los iso timestamps,
- * camelCase en lo demás), para que el adapter sea trivial.
+ * Pinia store y que consumen los componentes del dashboard. Hoy la
+ * data es mock hardcoded (ver useAgentsStore); cuando el backend
+ * cablee postMessage, este mismo shape va a llegar serializado por
+ * el wire — así que los identificadores usan la convención del
+ * backend (snake_case en los iso timestamps, camelCase en lo demás)
+ * para que el adapter sea trivial.
  *
  * Referencia autoritativa: KANBAN_DESIGN_BRIEF.md §9 + §11 +
  * HANDOFF.md (specs visuales de cada componente).
@@ -42,8 +42,9 @@ export type Priority = 'LOW' | 'MED' | 'HIGH';
  * `lifecycle` no se persiste en el wire: se deriva del store a
  * partir de los agentes asociados (active si tiene running/pending,
  * idle si solo tiene recent <24h, inactive si solo recent >=24h).
- * Acá lo dejamos opcional pre-calculado para que la mock data sea
- * más legible — en 1.4 esto se mueve a un getter.
+ * Acá lo dejamos pre-calculado para que la mock data sea más
+ * legible; cuando el backend mande agentes reales, esto se mueve a
+ * un getter derivado del store.
  */
 export interface Project {
   id: string;
@@ -79,7 +80,8 @@ export interface Agent {
   subtitle?: string;
   model?: string;
   startedAtIso?: string;
-  /** Tiempo transcurrido en ms. En 1.4 se recalcula con setInterval. */
+  /** Tiempo transcurrido en ms. Cuando el wire esté, se recalcula
+   * con un setInterval en el store. */
   elapsedMs?: number;
   /** % del context window usado (0-100). */
   contextUsedPct?: number;

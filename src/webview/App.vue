@@ -1,23 +1,40 @@
 <script setup lang="ts">
-// App.vue — root del webview.
-//
-// 1.3.c rota el render del AtomShowcase a la vista All projects.
-// AtomShowcase queda en disco (src/webview/views/AtomShowcase.vue)
-// para usar como regression visual on-demand si se tocan átomos.
+/**
+ * App.vue — root del webview.
+ *
+ * Layout estable que cambia solo el body según el estado del
+ * filtro:
+ *
+ *   ┌─ Toolbar (siempre) ──────────────────────┐
+ *   │   title + selector + context line cond.  │
+ *   ├─ Body ───────────────────────────────────┤
+ *   │   AllProjectsView  ↔  SingleProjectView  │
+ *   └──────────────────────────────────────────┘
+ *
+ * El routing es un v-if simple sobre `selectedProjectId` del
+ * composable useProjectFilter — no usamos vue-router porque solo
+ * hay 2 estados y un router formal sería overhead. Si la
+ * navegación se vuelve más rica en v0.2 (Projects screen) sí se
+ * justifica el router.
+ *
+ * La Toolbar vive acá (no en cada vista) para que el ProjectSelector
+ * mantenga su estado al rotar — el popover NO se cierra solo por
+ * cambiar de vista.
+ */
 
+import { useProjectFilter } from './composables/useProjectFilter';
+import Toolbar from './components/Toolbar.vue';
 import AllProjectsView from './views/AllProjectsView.vue';
+import SingleProjectView from './views/SingleProjectView.vue';
+
+const { selectedProjectId } = useProjectFilter();
 </script>
 
 <template>
-  <main
-    class="container"
-    :style="{
-      background: 'var(--background-view)',
-      color: 'var(--foreground)',
-      fontFamily: 'var(--font-ui)',
-    }"
-  >
-    <AllProjectsView />
+  <main class="container">
+    <Toolbar />
+    <SingleProjectView v-if="selectedProjectId" />
+    <AllProjectsView v-else />
   </main>
 </template>
 

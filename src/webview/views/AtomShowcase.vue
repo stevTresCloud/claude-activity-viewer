@@ -2,23 +2,22 @@
 /**
  * AtomShowcase — galería de los átomos del dashboard en aislamiento.
  *
- * Mientras esta fase no ensamble las secciones reales (NOW PLAYING
- * / UP NEXT / RECENT con sus cards completas — eso es 1.3.c), esta
- * vista permite validar visualmente cada átomo en todas sus
- * variantes y verificar que:
+ * Vista de desarrollo, NO el dashboard real (las vistas reales viven
+ * en AllProjectsView y SingleProjectView). Permite validar
+ * visualmente cada átomo en todas sus variantes y verificar que:
  *
  *   - Las CSS vars del @theme resuelven a colores correctos.
  *   - La animación `pulse` corre (halo difuso visible).
  *   - La animación width del ContextBar se ve al cargar.
  *   - `white-space: nowrap` del ModelBadge funciona en sidebars
  *     angostos.
- *   - El font codicons carga real (bonus: validamos los 3 glifos
- *     que la fase 1.3.c va a usar en RECENT — check, warning,
- *     circle-slash).
+ *   - El font codicons carga real (bonus: validamos los glifos que
+ *     RECENT usa — check, warning, circle-slash).
  *   - El Pinia store devuelve la mock data (renderizamos counts).
  *
- * En 1.3.c esta vista pasa a ser regression visual cuando se
- * toquen átomos; el App.vue rota a renderear la vista real.
+ * Queda en disco como regression visual on-demand: si se tocan
+ * átomos, importar este componente desde App.vue temporalmente
+ * para re-verificar las variantes en isolation.
  */
 
 import { computed } from 'vue';

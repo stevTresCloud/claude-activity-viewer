@@ -1,13 +1,10 @@
 <script setup lang="ts">
 /**
- * AllProjectsView — vista principal del dashboard, modo "All
- * projects" (sin filtro de project selector).
+ * AllProjectsView — vista global del dashboard (modo default, sin
+ * filtro de proyecto).
  *
- * Layout (KANBAN_DESIGN_BRIEF §4.1):
+ * Layout del body (KANBAN_DESIGN_BRIEF §4.1):
  *
- *   ┌── Toolbar ──────────────────────────────┐
- *   │ CLAUDE AGENTS                  + ⤴ ⋯    │
- *   │ Project: [ All projects (6)        ▼ ]  │
  *   ├── NOW PLAYING (3) ──────────────────────┤
  *   │ <ProjectGroup A>                        │
  *   │ <ProjectGroup B>                        │
@@ -16,23 +13,19 @@
  *   │ <ProjectGroup D>                        │
  *   │ <ProjectGroup E>                        │
  *   ├── RECENT (12) 1 FAILED   ▶  (colapsada) │
- *   └─────────────────────────────────────────┘
  *
- * En esta sub-fase (1.3.c):
+ * La Toolbar (title + selector + context line) vive en App.vue y se
+ * comparte con SingleProjectView, así que NO la renderizamos acá.
  *
- *   - El project selector es ESTÁTICO: muestra "All projects (6) ▼"
- *     pero el chevron no abre nada. Funcionalidad real en 1.3.d.
- *   - Los 3 botones de la toolbar son decorativos.
- *   - NOW PLAYING y UP NEXT arrancan expandidas; RECENT colapsada.
- *   - Click en cualquier section header toggle local de expansión.
- *   - RECENT colapsado significa que NO renderizamos AgentCardRecent
- *     todavía — basta con que el header muestre el counter (12) y
- *     el FailedBadge "1 FAILED" en rojo.
+ *   - NOW PLAYING y UP NEXT arrancan expandidas; RECENT colapsada
+ *     (volumen global puede ser grande, mejor diferir la pintada).
+ *   - RECENT colapsado significa que NO renderizamos AgentCardRecent —
+ *     basta con el counter (12) y el FailedBadge "1 FAILED" en rojo
+ *     del header.
  *
  * La agrupación de NOW/UP por (project + task + branch + batchId) se
  * hace inline acá; el bloque son ~12 líneas y extraer a composable
- * sería abstracción especulativa para un solo call site. Cuando en
- * 1.3.d entre el filtro del project selector, ahí se evalúa.
+ * sería abstracción especulativa para un solo call site.
  */
 
 import { computed, ref } from 'vue';
@@ -43,6 +36,7 @@ import ProjectGroup from '../components/sections/ProjectGroup.vue';
 import ProjectGroupHeader from '../components/sections/ProjectGroupHeader.vue';
 import AgentCardRunning from '../components/cards/AgentCardRunning.vue';
 import AgentCardPending from '../components/cards/AgentCardPending.vue';
+import AgentCardRecent from '../components/cards/AgentCardRecent.vue';
 
 const store = useAgentsStore();
 
@@ -95,43 +89,11 @@ function groupAgents(agents: Agent[]): GroupedAgents[] {
 
 const nowPlayingGroups = computed(() => groupAgents(store.nowPlaying));
 const upNextGroups = computed(() => groupAgents(store.upNext));
+const recentGroups = computed(() => groupAgents(store.recent));
 </script>
 
 <template>
   <div class="dashboard">
-    <!-- ============================================================
-         === Toolbar superior (KANBAN_DESIGN_BRIEF §5) ===
-         Title row + project selector estático. Click handlers son
-         placeholders — la funcionalidad entra en 1.3.d.
-         ============================================================ -->
-    <div class="toolbar">
-      <div class="title-row">
-        <span class="title">CLAUDE AGENTS</span>
-        <div class="toolbar-actions">
-          <button type="button" class="toolbar-btn" aria-label="new batch">
-            <i class="codicon codicon-add" />
-          </button>
-          <button type="button" class="toolbar-btn" aria-label="filter">
-            <i class="codicon codicon-filter" />
-          </button>
-          <button type="button" class="toolbar-btn" aria-label="more">
-            <i class="codicon codicon-more" />
-          </button>
-        </div>
-      </div>
-
-      <!-- === Project selector (placeholder estático) === -->
-      <div class="selector-row">
-        <span class="selector-label">Project:</span>
-        <button type="button" class="selector-trigger" aria-haspopup="listbox">
-          <span class="trigger-text">
-            All projects ({{ store.projects.length }})
-          </span>
-          <i class="codicon codicon-chevron-down chevron" />
-        </button>
-      </div>
-    </div>
-
     <!-- ============================================================
          === NOW PLAYING ===
          ============================================================ -->
@@ -190,10 +152,8 @@ const upNextGroups = computed(() => groupAgents(store.upNext));
 
     <!-- ============================================================
          === RECENT ===
-         Colapsada por default. En esta sub-fase NO renderizamos
-         cards (eso es 1.3.d Single project / 1.5 polish). El header
-         muestra el counter + el FailedBadge — suficiente para el
-         smoke gate.
+         Colapsada por default. Al expandir renderiza los recent
+         agrupados por project group (mismo patrón que NOW/UP).
          ============================================================ -->
     <SectionHeader
       kind="RECENT"
@@ -202,6 +162,22 @@ const upNextGroups = computed(() => groupAgents(store.upNext));
       :expanded="recentOpen"
       @toggle="recentOpen = !recentOpen"
     />
+    <div v-if="recentOpen" class="section-body">
+      <ProjectGroup v-for="group in recentGroups" :key="group.key">
+        <template #header>
+          <ProjectGroupHeader
+            :project="group.project"
+            :task="group.task"
+            :branch="group.branch"
+          />
+        </template>
+        <AgentCardRecent
+          v-for="agent in group.agents"
+          :key="agent.id"
+          :agent="agent"
+        />
+      </ProjectGroup>
+    </div>
   </div>
 </template>
 
@@ -212,111 +188,6 @@ const upNextGroups = computed(() => groupAgents(store.upNext));
   flex-direction: column;
   /* No usamos gap entre el body de sección y el siguiente header,
    * porque el border-top del header ya da la separación visual. */
-}
-
-/* ===========================================================
-   === Toolbar — title row + project selector              ===
-   =========================================================== */
-
-.toolbar {
-  display: flex;
-  flex-direction: column;
-}
-
-.title-row {
-  height: 35px;
-  padding: 0 8px 0 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.title {
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  color: var(--foreground);
-}
-
-.toolbar-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.toolbar-btn {
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--foreground);
-  opacity: 0.7;
-  border-radius: 4px;
-  cursor: pointer;
-  padding: 0;
-}
-.toolbar-btn:hover {
-  background: rgb(255 255 255 / 0.06);
-  opacity: 1;
-}
-.toolbar-btn .codicon {
-  font-size: 14px;
-  line-height: 1;
-}
-
-/* === Selector row === */
-.selector-row {
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.selector-label {
-  font-size: 11px;
-  color: var(--foreground-muted);
-  flex-shrink: 0;
-}
-
-.selector-trigger {
-  flex: 1;
-  height: 26px;
-  padding: 0 8px;
-  background: var(--background-input);
-  border: 1px solid var(--border-input);
-  border-radius: 2px;
-  color: var(--foreground);
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-.selector-trigger:hover {
-  border-color: var(--foreground-muted);
-}
-.selector-trigger:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 1px solid var(--focus-ring);
-  outline-offset: 0;
-}
-
-.trigger-text {
-  flex: 1;
-  text-align: left;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.chevron {
-  font-size: 10px;
-  color: var(--foreground-muted);
-  flex-shrink: 0;
 }
 
 /* ===========================================================

@@ -13,13 +13,13 @@
  * Referencia: HANDOFF.md §2.14.
  */
 
-const props = defineProps<{
+defineProps<{
   count: number;
 }>();
 </script>
 
 <template>
-  <span v-if="props.count > 0" class="failed-badge">{{ props.count }} FAILED</span>
+  <span v-if="count > 0" class="failed-badge">{{ count }} FAILED</span>
 </template>
 
 <style scoped>

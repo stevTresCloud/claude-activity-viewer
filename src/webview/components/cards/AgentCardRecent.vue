@@ -7,85 +7,68 @@
  *
  * Meta depende del status:
  *   - done:      "Xm Ys · 12.5k"
- *   - cancelled: "cancelled"
  *   - failed:    "Xm Ys"
+ *   - cancelled: "Xm Ys"
  *
  * El stripe es 2px (no 3px como running/pending) — el HANDOFF usa
  * el ancho como señal sutil de "esto ya está cerrado, menos énfasis
  * visual". Failed además lleva un tinte de fondo rojo muy suave
  * para que destaque sin gritar.
  *
- * Este componente se crea en 1.3.c para no fragmentar el trabajo —
- * en la vista All projects la sección RECENT va colapsada por
- * default, así que no se renderiza. Queda list-ready para 1.3.d
- * (Single project view) y para 1.5 cuando RECENT se vuelva
- * expandible interactivamente.
- *
  * Referencia: HANDOFF.md §2.10.
  */
 
 import { computed } from 'vue';
-import type { Agent } from '../../types';
-import { formatDuration, formatTokens } from '../../utils/format';
+import type { Agent, AgentStatus } from '../../types';
+import { formatElapsed, formatTokens } from '../../utils/format';
 
 const props = defineProps<{
   agent: Agent;
 }>();
 
-// === Stripe color + icon por status ===
+// === Map de presentación por status (color del stripe/icon + glyph) ===
+//
+// Un solo lookup vs 3 switch separados. Si cambia el mapeo (ej.
+// `cancelled` empieza a usar otro icon), tocamos un solo lugar.
 
-const stripeColor = computed(() => {
-  switch (props.agent.status) {
-    case 'done':
-      return 'var(--color-success)';
-    case 'failed':
-      return 'var(--color-error)';
-    case 'cancelled':
-    default:
-      return 'var(--color-muted)';
+const STATUS_PRESENTATION = {
+  done: { color: 'var(--stripe-done)', iconClass: 'codicon-check' },
+  failed: { color: 'var(--stripe-failed)', iconClass: 'codicon-warning' },
+  cancelled: {
+    color: 'var(--stripe-cancelled)',
+    iconClass: 'codicon-circle-slash',
+  },
+} as const satisfies Record<
+  'done' | 'failed' | 'cancelled',
+  { color: string; iconClass: string }
+>;
+
+/**
+ * Helper para resolver presentación con guard del status. Si llega
+ * un status raro (no debería en RECENT), cae a `cancelled`.
+ */
+function presentationFor(status: AgentStatus) {
+  if (status === 'done' || status === 'failed' || status === 'cancelled') {
+    return STATUS_PRESENTATION[status];
   }
-});
+  return STATUS_PRESENTATION.cancelled;
+}
 
-const iconClass = computed(() => {
-  switch (props.agent.status) {
-    case 'done':
-      return 'codicon-check';
-    case 'failed':
-      return 'codicon-warning';
-    case 'cancelled':
-    default:
-      return 'codicon-circle-slash';
-  }
-});
+const presentation = computed(() => presentationFor(props.agent.status));
 
-const iconColor = computed(() => {
-  switch (props.agent.status) {
-    case 'done':
-      return 'var(--color-success)';
-    case 'failed':
-      return 'var(--color-error)';
-    case 'cancelled':
-    default:
-      return 'var(--color-muted)';
-  }
-});
-
-// === Meta derivado del status ===
+// === Meta — duración + tokens si done ===
+//
+// HANDOFF §2.10 dicta misma grilla "Xm Ys" para done/failed/cancelled.
+// done agrega "· {tokens}k" porque tiene tokensUsed; failed/cancelled
+// dejan solo la duración.
 
 const meta = computed(() => {
-  const duration = formatDuration(props.agent.durationMs);
-  switch (props.agent.status) {
-    case 'done':
-      return `${duration} · ${formatTokens(props.agent.tokensUsed)}`;
-    case 'cancelled':
-      return 'cancelled';
-    case 'failed':
-    default:
-      return duration;
+  const duration = formatElapsed(props.agent.durationMs);
+  if (props.agent.status === 'done') {
+    return `${duration} · ${formatTokens(props.agent.tokensUsed)}`;
   }
+  return duration;
 });
-
-// === Failed bg tint condicional ===
 
 const isFailed = computed(() => props.agent.status === 'failed');
 </script>
@@ -94,9 +77,13 @@ const isFailed = computed(() => props.agent.status === 'failed');
   <div
     class="card"
     :class="{ 'is-failed': isFailed }"
-    :style="{ borderLeftColor: stripeColor }"
+    :style="{ borderLeftColor: presentation.color }"
   >
-    <i class="codicon icon" :class="iconClass" :style="{ color: iconColor }" />
+    <i
+      class="codicon icon"
+      :class="presentation.iconClass"
+      :style="{ color: presentation.color }"
+    />
     <span class="name">{{ agent.name }}</span>
     <span class="meta">{{ meta }}</span>
   </div>

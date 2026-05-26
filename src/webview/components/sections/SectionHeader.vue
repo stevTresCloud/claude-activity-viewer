@@ -11,8 +11,8 @@
  * abierta en el padre (AllProjectsView), que arranca con NOW/UP
  * expandidas y RECENT colapsada por default.
  *
- * Sin animación height — la transición visual del body queda para
- * 1.5 (polish). Por ahora colapsar = `v-if` directo.
+ * Sin animación height — la transición visual del body es trabajo
+ * de polish futuro. Por ahora colapsar = `v-if` directo.
  *
  * Referencia: HANDOFF.md §2.5.
  */

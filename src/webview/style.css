@@ -47,6 +47,27 @@
   --color-info: var(--vscode-editorInfo-foreground, #2196f3);
   --color-muted: var(--vscode-descriptionForeground);
 
+  /* Halo del pulse del status dot running (HANDOFF §1.4). Alpha
+   * sobre verde — los tokens VS Code no proveen alphas, así que va
+   * hardcodeado con el mismo verde que --color-success. */
+  --color-pulse-halo: rgb(76 175 80 / 0.3);
+
+  /* === Stripe colors (HANDOFF §1.5) ===
+   * Punto único de cambio para los 3px border-left de cada agent card
+   * según su status. Si se rediseña el código de color por estado,
+   * basta cambiar acá sin tocar cada componente. */
+  --stripe-running: var(--color-info);
+  --stripe-pending: var(--color-warning);
+  --stripe-done: var(--color-success);
+  --stripe-failed: var(--color-error);
+  --stripe-cancelled: var(--color-muted);
+
+  /* Background del index badge (UP NEXT cards): un negro un poco
+   * más oscuro que --background-card para que el badge resalte como
+   * "etiqueta de orden" y no se confunda con el resto. Los tokens
+   * VS Code no proveen un "darker-than-sidebar" listo. */
+  --background-index-badge: #0f0f0f;
+
   /* === Tipografía === */
   --font-ui: var(
     --vscode-font-family,
@@ -95,8 +116,7 @@ body {
   }
 }
 
-/* 4.2 — Sweeping progress bar (footer de cada card running).
- * No se usa en 1.3.b, pero queda lista para 1.3.c. */
+/* 4.2 — Sweeping progress bar (footer de cada card running). */
 @keyframes sweep {
   0% {
     transform: translateX(-100%);
@@ -106,9 +126,32 @@ body {
   }
 }
 
+/* 4.4 — Dropdown popover entry: fade + slide-down 4px → 0.
+ * Usada por el popover del ProjectSelector cuando abre. */
+@keyframes dropdown-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  /* Apaga las animaciones explícitas (pulse, sweep, dropdown-in). */
   .dot-pulse,
-  .sweep-bar {
+  .sweep-bar,
+  .dropdown-popover {
     animation: none !important;
+  }
+  /* También las transiciones — el HANDOFF §4 pide respetar el
+   * setting end-to-end. Esto cubre rotación de chevrons, fill de la
+   * context bar, hover bg, etc. sin tener que listar cada selector. */
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
   }
 }

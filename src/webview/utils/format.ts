@@ -22,8 +22,8 @@
  *   formatElapsed(0)       → "0m 00s"
  *
  * El brief (KANBAN §11.2) emite estos tiempos directos, así que el
- * format calza con la mock data 1:1. En 1.4 cuando llegue del wire,
- * el shape no cambia.
+ * format calza con la mock data 1:1. Cuando llegue del wire, el
+ * shape no cambia.
  */
 export function formatElapsed(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return '—';
@@ -31,21 +31,6 @@ export function formatElapsed(ms: number | undefined): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
-}
-
-// === Duración cerrada (recent done/failed/cancelled) ===
-
-/**
- * formatDuration — ms → "Xm 0Ys" (misma grilla que elapsed, con
- * padding cero a 2 dígitos en segundos).
- *
- * Visualmente equivalente a formatElapsed; los dejamos separados
- * por semántica (elapsed es "vivo", duration es "cerrado") por si
- * más adelante divergen — ej. duration podría agregar horas si
- * supera 60min (`Xh Ym`) y elapsed no.
- */
-export function formatDuration(ms: number | undefined): string {
-  return formatElapsed(ms);
 }
 
 // === Tiempo relativo desde un ISO (queued_since, completed_at) ===

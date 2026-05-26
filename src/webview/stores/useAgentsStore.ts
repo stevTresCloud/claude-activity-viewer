@@ -3,8 +3,8 @@
  *
  * Pinia store con la data mock que pueblan las vistas mientras el
  * backend real (MCP → AgentRunner → postMessage) no esté cableado.
- * El cableo es Fase 1.4 — acá NO hay actions de mutación todavía,
- * solo state hardcoded + getters derivados que las vistas consumen.
+ * Mientras tanto no hay actions de mutación; solo state hardcoded
+ * + getters derivados que las vistas consumen.
  *
  * Estilo: composition API (`defineStore('agents', () => {...})`)
  * para alinear con `<script setup>` de los componentes.
@@ -13,8 +13,8 @@
  * agentes RECENT incluyen 1 failed (rebase-conflicts) para que el
  * FailedBadge de la sección header sea visible. Los proyectos
  * tienen lifecycle pre-calculado (active/idle/inactive) según el
- * algoritmo de §10 del brief — en 1.4 esto se moverá a un getter
- * derivado cuando el wire devuelva agentes en vez de proyectos.
+ * algoritmo de §10 del brief; cuando el wire devuelva agentes en
+ * vez de proyectos, esto se mueve a un getter derivado.
  * ================================================================ */
 
 import { defineStore } from 'pinia';
@@ -321,8 +321,8 @@ const AGENTS: Agent[] = [
 /**
  * Now de referencia para el mock. Hardcoded para que los getters
  * derivados sean reproducibles (idle vs inactive depende de "ahora
- * - completed_at >= 24h"). En 1.4 esto pasa a Date.now() real y
- * los timestamps los emite el backend.
+ * - completed_at >= 24h"). Cuando el wire mande timestamps reales,
+ * esto pasa a Date.now() del momento del render.
  *
  * Exportado para que los helpers de format (utils/format.ts) lo
  * usen como "now" al calcular "X ago" sobre la mock data, sin
@@ -353,6 +353,9 @@ export const useAgentsStore = defineStore('agents', () => {
    * RECENT — done / failed / cancelled ordenados por completed_at
    * descendente (más reciente primero). El brief lo muestra así en
    * el wireframe ASCII de la vista Single project.
+   *
+   * `.filter()` ya devuelve un array nuevo, así que el sort no muta
+   * `agents.value` — no hace falta `.slice()` extra.
    */
   const recent = computed<Agent[]>(() =>
     agents.value
@@ -360,7 +363,6 @@ export const useAgentsStore = defineStore('agents', () => {
         (a) =>
           a.status === 'done' || a.status === 'failed' || a.status === 'cancelled',
       )
-      .slice()
       .sort((a, b) => {
         // El sort por iso string funciona porque ISO 8601 ordena
         // lexicograficamente igual que cronológicamente.
@@ -374,10 +376,15 @@ export const useAgentsStore = defineStore('agents', () => {
    * Cantidad de failed en las últimas 24h. Alimenta el FailedBadge
    * del section header de RECENT — el badge solo se renderiza
    * cuando este getter > 0.
+   *
+   * Iteramos `agents.value` directo (no `recent.value`) para no
+   * acoplar este count al sort de la sección — son cálculos
+   * independientes y mantenerlos separados deja claro que el badge
+   * NO depende del orden visual.
    */
   const recentFailedCount = computed<number>(
     () =>
-      recent.value.filter((a) => {
+      agents.value.filter((a) => {
         if (a.status !== 'failed') return false;
         if (!a.completedAtIso) return false;
         const ageMs = MOCK_NOW_MS - new Date(a.completedAtIso).getTime();
@@ -390,9 +397,10 @@ export const useAgentsStore = defineStore('agents', () => {
   /**
    * Proyectos agrupados por lifecycle, para el dropdown del project
    * selector que los muestra en 3 bloques separados por divider.
-   * Orden dentro de cada bloque: alfabético por nombre (en 1.4 el
-   * brief permite cambiar a "más reciente started_at desc" para
-   * active y "más reciente completed_at desc" para idle/inactive).
+   * Orden dentro de cada bloque: alfabético por nombre — el brief
+   * permite cambiar a "más reciente started_at desc" (active) o
+   * "más reciente completed_at desc" (idle/inactive) cuando el wire
+   * traiga timestamps reales.
    */
   const projectsByLifecycle = computed(() => {
     const byLifecycle = {
