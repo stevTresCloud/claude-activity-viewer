@@ -127,6 +127,73 @@ export interface AgentCompletionEvent {
   reason?: string;
 }
 
+// === Listener helper ===
+
+/**
+ * Helper genérico para los 3 arrays de callbacks que mantenía el
+ * bridge (`attachCallbacks`, `runningCountListeners`,
+ * `completionListeners`). Encapsula el patrón `push + dispose +
+ * iterate-with-catch + log` para evitar triplicar la misma lógica.
+ *
+ * No se exporta: solo lo consume el bridge en este archivo. Si
+ * algún día otro módulo lo necesita, se mueve a `src/shared/`.
+ *
+ * Convención: `T = void` para listeners sin payload (se llama
+ * `emit(undefined)`). El compilador acepta `void` como tipo de
+ * parámetro y lo trata como `undefined` en runtime.
+ */
+class Listeners<T> {
+  private readonly cbs: Array<(arg: T) => void> = [];
+
+  constructor(
+    private readonly channel: vscode.OutputChannel,
+    private readonly label: string,
+  ) {}
+
+  /**
+   * Suscribe un callback. Devuelve la función de des-registro.
+   *
+   * Semántica del dispose: busca el callback por referencia (`indexOf`)
+   * y lo remueve UNA vez. Llamar al dispose dos veces no rompe — la
+   * segunda llamada no encuentra el cb (ya removido) y es no-op. Si
+   * el mismo `cb` se registró N veces y se llama al dispose una sola
+   * vez, queda en el array N-1 instancias del cb.
+   */
+  add(cb: (arg: T) => void): () => void {
+    this.cbs.push(cb);
+    return () => {
+      const i = this.cbs.indexOf(cb);
+      if (i >= 0) this.cbs.splice(i, 1);
+    };
+  }
+
+  /**
+   * Invoca a TODOS los listeners con el mismo arg. Tolerante a
+   * fallos: una excepción en un listener no impide que el resto se
+   * ejecute. Los errores se loggean al OutputChannel con el `label`
+   * del constructor para correlacionar con el bridge log.
+   *
+   * Limitación: NO es re-entrant. Si un cb llama a su propio
+   * dispose dentro de `emit`, el `splice` muta `this.cbs` durante
+   * iteración y el siguiente cb se skipea. Ningún listener actual
+   * (attach/running-count/completion) tiene re-entrancy, así que el
+   * trade-off entre snapshot `[...this.cbs]` y simplicidad gana la
+   * simplicidad. Si se agrega un listener re-entrant, snapshotear.
+   */
+  emit(arg: T): void {
+    if (this.cbs.length === 0) return;
+    for (const cb of this.cbs) {
+      try {
+        cb(arg);
+      } catch (err) {
+        this.channel.appendLine(
+          `[${ts()}] [bridge] ${this.label} listener error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+}
+
 // === Bridge ===
 
 export interface DashboardBridgeOptions {
@@ -168,20 +235,18 @@ export class DashboardBridge {
   // el scanner-controller para re-emitir su último resultado: sin
   // esto, cerrar y reabrir el sidebar deja la sección PAST SESSIONS
   // vacía hasta el siguiente tick del auto-refresh.
-  private readonly attachCallbacks: Array<() => void> = [];
+  private readonly attachListeners: Listeners<void>;
 
   // Listeners del count de agentes running. Lo consume el
   // StatusBar item (extension host). Mantenemos array porque la
   // suscripción/de-suscripción es rara (1 por activación de la
   // extension); no vale la pena un Set.
-  private readonly runningCountListeners: Array<(count: number) => void> = [];
+  private readonly runningCountListeners: Listeners<number>;
 
   // Listeners de "agente entró en estado terminal". Lo consume el
   // CompletionNotifier (toast VS Code). Mismo patrón que
   // runningCountListeners — 1 listener fijo por activación, array OK.
-  private readonly completionListeners: Array<
-    (event: AgentCompletionEvent) => void
-  > = [];
+  private readonly completionListeners: Listeners<AgentCompletionEvent>;
 
   // Persistencia debounced: cada evento agenda un flush, sucesivos
   // mientras el timer corre se colapsan en uno solo. Sin esto, un
@@ -193,6 +258,15 @@ export class DashboardBridge {
     this.context = options.context;
     this.channel = options.channel;
     this.runner = options.runner;
+    this.attachListeners = new Listeners<void>(this.channel, 'attach');
+    this.runningCountListeners = new Listeners<number>(
+      this.channel,
+      'running-count',
+    );
+    this.completionListeners = new Listeners<AgentCompletionEvent>(
+      this.channel,
+      'completion',
+    );
   }
 
   // ====================================================================
@@ -279,15 +353,7 @@ export class DashboardBridge {
     // Notificamos a los suscriptores (scanner-controller) para que
     // re-emitan su último cache al webview. Fire-and-forget; un
     // callback que tire no debe romper attach.
-    for (const cb of this.attachCallbacks) {
-      try {
-        cb();
-      } catch (err) {
-        this.channel.appendLine(
-          `[${ts()}] [bridge] attach callback error: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    this.attachListeners.emit(undefined);
     return webview;
   }
 
@@ -299,11 +365,7 @@ export class DashboardBridge {
    * Retorna una función de des-registro para limpieza si hace falta.
    */
   onAttach(cb: () => void): () => void {
-    this.attachCallbacks.push(cb);
-    return () => {
-      const i = this.attachCallbacks.indexOf(cb);
-      if (i >= 0) this.attachCallbacks.splice(i, 1);
-    };
+    return this.attachListeners.add(cb);
   }
 
   /**
@@ -543,14 +605,11 @@ export class DashboardBridge {
    * filtra duplicados a nivel de su propio render.
    */
   onRunningCountChange(cb: (count: number) => void): () => void {
-    this.runningCountListeners.push(cb);
+    const off = this.runningCountListeners.add(cb);
     // Emitimos el count actual al suscribirse para que el StatusBar
     // se pinte coherente sin esperar al primer cambio.
     cb(this.getRunningCount());
-    return () => {
-      const i = this.runningCountListeners.indexOf(cb);
-      if (i >= 0) this.runningCountListeners.splice(i, 1);
-    };
+    return off;
   }
 
   /** Cantidad de agentes en estado `running` ahora mismo. */
@@ -563,17 +622,7 @@ export class DashboardBridge {
   }
 
   private notifyRunningCount(): void {
-    if (this.runningCountListeners.length === 0) return;
-    const count = this.getRunningCount();
-    for (const cb of this.runningCountListeners) {
-      try {
-        cb(count);
-      } catch (err) {
-        this.channel.appendLine(
-          `[${ts()}] [bridge] running-count listener error: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    this.runningCountListeners.emit(this.getRunningCount());
   }
 
   /**
@@ -589,24 +638,11 @@ export class DashboardBridge {
    * debe usar `listAgents()` + filtrar por status terminal.
    */
   onAgentCompleted(cb: (event: AgentCompletionEvent) => void): () => void {
-    this.completionListeners.push(cb);
-    return () => {
-      const i = this.completionListeners.indexOf(cb);
-      if (i >= 0) this.completionListeners.splice(i, 1);
-    };
+    return this.completionListeners.add(cb);
   }
 
   private notifyCompletion(event: AgentCompletionEvent): void {
-    if (this.completionListeners.length === 0) return;
-    for (const cb of this.completionListeners) {
-      try {
-        cb(event);
-      } catch (err) {
-        this.channel.appendLine(
-          `[${ts()}] [bridge] completion listener error: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    this.completionListeners.emit(event);
   }
 
   // ====================================================================

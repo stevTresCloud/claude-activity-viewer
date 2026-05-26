@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
+  CANCEL_AGENT_INPUT_SHAPE,
   GET_AGENT_LOG_INPUT_SHAPE,
   LIST_AGENTS_INPUT_SHAPE,
   SPAWN_AGENTS_INPUT_SHAPE,
@@ -26,6 +27,7 @@ import {
 const schema = z.object(SPAWN_AGENTS_INPUT_SHAPE);
 const listAgentsSchema = z.object(LIST_AGENTS_INPUT_SHAPE);
 const getAgentLogSchema = z.object(GET_AGENT_LOG_INPUT_SHAPE);
+const cancelAgentSchema = z.object(CANCEL_AGENT_INPUT_SHAPE);
 
 const validTask = {
   prompt: 'hola',
@@ -193,6 +195,23 @@ describe('GET_AGENT_LOG_INPUT_SHAPE — args y bounds', () => {
       agent_id: 'abc',
       since: 100.5,
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('CANCEL_AGENT_INPUT_SHAPE — args y bounds', () => {
+  it('agent_id válido pasa', () => {
+    const result = cancelAgentSchema.safeParse({ agent_id: 'abc-123' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rechaza agent_id vacío (sin id no podemos resolver el agente)', () => {
+    const result = cancelAgentSchema.safeParse({ agent_id: '' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza agent_id ausente', () => {
+    const result = cancelAgentSchema.safeParse({});
     expect(result.success).toBe(false);
   });
 });

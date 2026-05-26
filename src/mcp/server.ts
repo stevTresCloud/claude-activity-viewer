@@ -6,9 +6,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { DashboardBridge } from '../dashboard/bridge';
 import { ts } from '../runtime/log';
 import {
+  CANCEL_AGENT_INPUT_SHAPE,
   GET_AGENT_LOG_INPUT_SHAPE,
   LIST_AGENTS_INPUT_SHAPE,
   SPAWN_AGENTS_INPUT_SHAPE,
+  type CancelAgentArgs,
   type GetAgentLogArgs,
   type SpawnAgentsArgs,
 } from './types';
@@ -66,6 +68,7 @@ export class OrchestratorMcpServer {
     this.registerSpawnAgents(server);
     this.registerListAgents(server);
     this.registerGetAgentLog(server);
+    this.registerCancelAgent(server);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -230,6 +233,84 @@ export class OrchestratorMcpServer {
             },
           ],
         };
+      },
+    );
+  }
+
+  // === Tool: cancel_agent ===
+  //
+  // Wrapper trivial de `bridge.cancel`. El bridge retorna `boolean`
+  // (true = había un AbortController vivo y se disparó; false = no
+  // existe o ya terminó). Para el chat externo, `cancelled: false`
+  // NO es error — es estado legítimo "el agente ya estaba muerto".
+  // Solo excepciones reales del bridge se propagan como `isError`.
+  //
+  // La lógica vive en `cancelAgent` público para que los tests
+  // unitarios puedan ejercer la rama true/false sin levantar
+  // McpServer + transport HTTP.
+
+  /**
+   * Cancela el agente identificado por `agentId`.
+   * Devuelve `{ cancelled, agent_id }`. `cancelled=false` indica
+   * que no había agente vivo con ese id (puede haber terminado
+   * ya, nunca existido, o estar en otro registry).
+   */
+  cancelAgent(agentId: string): { cancelled: boolean; agent_id: string } {
+    const cancelled = this.bridge.cancel(agentId);
+    this.channel.appendLine(
+      `[${ts()}] [mcp] cancel_agent agent=${agentId.slice(0, 8)} cancelled=${cancelled}`,
+    );
+    return { cancelled, agent_id: agentId };
+  }
+
+  private registerCancelAgent(server: McpServer): void {
+    server.registerTool(
+      'cancel_agent',
+      {
+        title: 'Cancel agent',
+        description:
+          'Cancela un agente vivo por id. Dispara el AbortController del bridge y el agente entra a status=cancelled. ' +
+          'Devuelve `{cancelled, agent_id}`. `cancelled=false` no es error: indica que el agente no estaba vivo ' +
+          '(terminó previamente, nunca existió, o pertenece a otro registry). Errores reales del bridge se ' +
+          'reportan como isError:true.',
+        inputSchema: CANCEL_AGENT_INPUT_SHAPE,
+      },
+      async (args: CancelAgentArgs) => {
+        // try/catch porque la description del tool promete que
+        // "errores reales del bridge se reportan como isError:true".
+        // Hoy bridge.cancel no tira (solo invoca abort.abort), pero
+        // el contrato debe matchear el código aunque la rama no se
+        // ejerza en producción — un cambio futuro del bridge puede
+        // romper la promesa silentemente sin esto.
+        try {
+          const payload = this.cancelAgent(args.agent_id);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(payload, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.channel.appendLine(
+            `[${ts()}] [mcp] !!! cancel_agent failed: ${msg}`,
+          );
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  { error: msg, agent_id: args.agent_id },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
       },
     );
   }

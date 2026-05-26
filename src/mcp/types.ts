@@ -142,3 +142,25 @@ export type GetAgentLogArgs = {
   agent_id: string;
   since?: number;
 };
+
+// === Input schema del tool `cancel_agent` ===
+//
+// `agent_id`: requerido. UUID retornado por spawn_agents.
+//
+// Diseño: wrapper trivial de `bridge.cancel(agentId)`. El bridge
+// retorna `boolean` (true = había un AbortController vivo y se
+// disparó; false = no existe o ya terminó). Para el caller MCP
+// ese `false` NO es error operacional — es estado legítimo "el
+// agente ya estaba muerto", así que respondemos `{cancelled: false}`
+// sin `isError`. Errores reales del bridge (excepciones) sí
+// emergen como `isError: true`.
+export const CANCEL_AGENT_INPUT_SHAPE = {
+  agent_id: z
+    .string()
+    .min(1)
+    .describe('Id del agente devuelto por spawn_agents (UUID).'),
+} as const;
+
+export type CancelAgentArgs = {
+  agent_id: string;
+};

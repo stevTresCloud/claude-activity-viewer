@@ -173,8 +173,12 @@ function onResume(event: MouseEvent): void {
   padding-bottom: 6px;
 }
 .card:hover {
-  background: rgb(255 255 255 / 0.04);
+  background: var(--card-hover-bg-subtle);
 }
+/* Sin :focus-visible: el root es role="listitem" sin tabindex —
+ * la interactividad real vive en .prompt y .resume-btn (hijos
+ * focusables propios). Una regla focus-visible aquí sería
+ * dead-code (el root nunca recibe focus). */
 
 .icon {
   width: 12px;

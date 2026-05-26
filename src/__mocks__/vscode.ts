@@ -20,6 +20,8 @@
  * archivo en producción).
  * ================================================================ */
 
+import { vi } from 'vitest';
+
 type ConfigStore = Record<string, Record<string, unknown>>;
 type FolderEntry = { readonly uri: { readonly fsPath: string } };
 
@@ -67,6 +69,30 @@ const statusBarItems: Array<{
   visible: boolean;
   disposed: boolean;
 }> = [];
+
+// Panels creados via createWebviewPanel. Los tests del
+// DetailPanelManager inspeccionan estas instancias para verificar
+// open/reveal/dispose y secuenciamiento entre agentes distintos.
+interface FakeWebviewPanel {
+  viewType: string;
+  title: string;
+  viewColumn: number;
+  options: Record<string, unknown>;
+  iconPath: unknown;
+  disposed: boolean;
+  webview: {
+    html: string;
+    cspSource: string;
+    asWebviewUri: (uri: unknown) => unknown;
+    onDidReceiveMessage: ReturnType<typeof vi.fn>;
+    postMessage: ReturnType<typeof vi.fn>;
+  };
+  reveal: ReturnType<typeof vi.fn>;
+  dispose: () => void;
+  onDidDispose: (cb: () => void) => void;
+  _disposeListeners: Array<() => void>;
+}
+const webviewPanels: FakeWebviewPanel[] = [];
 
 // === API pública (la que ve el código bajo prueba) ===
 
@@ -159,6 +185,40 @@ export const window = {
     // claro a una llamada silenciosa.
     throw new Error('mocked vscode.window.createTerminal no implementado');
   },
+  createWebviewPanel(
+    viewType: string,
+    title: string,
+    viewColumn: number,
+    options: Record<string, unknown>,
+  ): FakeWebviewPanel {
+    const panel: FakeWebviewPanel = {
+      viewType,
+      title,
+      viewColumn,
+      options,
+      iconPath: undefined,
+      disposed: false,
+      _disposeListeners: [],
+      webview: {
+        html: '',
+        cspSource: 'self',
+        asWebviewUri: (uri: unknown) => uri,
+        onDidReceiveMessage: vi.fn(),
+        postMessage: vi.fn(),
+      },
+      reveal: vi.fn(),
+      dispose(): void {
+        if (this.disposed) return;
+        this.disposed = true;
+        for (const cb of this._disposeListeners) cb();
+      },
+      onDidDispose(cb: () => void): void {
+        this._disposeListeners.push(cb);
+      },
+    };
+    webviewPanels.push(panel);
+    return panel;
+  },
 };
 
 export const commands = {
@@ -173,6 +233,14 @@ export const StatusBarAlignment = {
   Right: 2,
 };
 
+export const ViewColumn = {
+  Active: -1,
+  Beside: -2,
+  One: 1,
+  Two: 2,
+  Three: 3,
+};
+
 export class ThemeColor {
   constructor(public readonly id: string) {}
 }
@@ -180,6 +248,15 @@ export class ThemeColor {
 export const Uri = {
   parse(value: string) {
     return { toString: () => value, fsPath: value };
+  },
+  joinPath(base: { fsPath: string }, ...segments: string[]) {
+    // Concatenación mínima: une fsPath de base con segments via "/".
+    // No normaliza ni resuelve — el test confía en pasarle paths
+    // bien formados. Real VS Code usa Uri proper; el mock solo
+    // necesita un objeto con `fsPath` para que fs.readFileSync no
+    // explote y `toString()` para los regex de buildWebviewHtml.
+    const joined = [base.fsPath, ...segments].join('/');
+    return { toString: () => joined, fsPath: joined };
   },
 };
 
@@ -254,6 +331,20 @@ export function __getStatusBarItems(): ReadonlyArray<{
   return statusBarItems;
 }
 
+/**
+ * Panels creados via `window.createWebviewPanel`. Los tests del
+ * DetailPanelManager los inspeccionan para verificar el ciclo
+ * create/reveal/dispose ante distintos agentes.
+ */
+export function __getWebviewPanels(): ReadonlyArray<{
+  viewType: string;
+  title: string;
+  disposed: boolean;
+  reveal: ReturnType<typeof vi.fn>;
+}> {
+  return webviewPanels;
+}
+
 export function __resetVscode(): void {
   configValues = {};
   workspaceFoldersValue = undefined;
@@ -263,4 +354,5 @@ export function __resetVscode(): void {
   infoCalls.length = 0;
   executedCommands.length = 0;
   statusBarItems.length = 0;
+  webviewPanels.length = 0;
 }

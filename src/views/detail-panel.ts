@@ -26,11 +26,10 @@
  *   esquemas. Inyección de un global es la solución clean.
  * ================================================================ */
 
-import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import type { DashboardBridge } from '../dashboard/bridge';
 import type { DashboardEventToExtension } from '../shared/dashboard-protocol';
+import { buildWebviewHtml } from './webview-html';
 
 export class DetailPanelManager implements vscode.Disposable {
   /** viewType del panel (estable, no aparece en UI). */
@@ -101,7 +100,14 @@ export class DetailPanelManager implements vscode.Disposable {
     );
 
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'resources', 'icon.svg');
-    panel.webview.html = this.buildHtml(panel.webview, webviewRoot, agentId);
+    // Builder compartido inyecta el script con `window.__claudeOrchestrator`
+    // que el bundle Vue lee via `useDetailMode` para arrancar
+    // AgentDetailView en lugar de la sidebar default.
+    panel.webview.html = buildWebviewHtml({
+      webview: panel.webview,
+      extensionUri: this.extensionUri,
+      inlineConfig: { mode: 'detail', agentId },
+    });
 
     // El bridge incorpora el webview al broadcast set. Recibirá los
     // mismos eventos que el sidebar (agent_list inicial + agent_log
@@ -144,59 +150,6 @@ export class DetailPanelManager implements vscode.Disposable {
     this.channel.appendLine(
       `[detail] open agent=${agentId.slice(0, 8)} name=${agentName}`,
     );
-  }
-
-  /**
-   * Construye el HTML del webview a partir del bundle Vite. Reusa la
-   * lógica del DashboardViewProvider (CSP, reescritura de assets/),
-   * agregando un `<script nonce>` que inyecta
-   * `window.__claudeOrchestrator = {mode: 'detail', agentId}` antes
-   * del bundle.
-   */
-  private buildHtml(
-    webview: vscode.Webview,
-    webviewRoot: vscode.Uri,
-    agentId: string,
-  ): string {
-    const indexPath = vscode.Uri.joinPath(webviewRoot, 'index.html');
-    let html = fs.readFileSync(indexPath.fsPath, 'utf8');
-
-    // Reescritura de paths assets/ → vscode-webview:// (mismo
-    // patrón del DashboardViewProvider).
-    html = html.replace(
-      /(href|src)="\.?\/?(assets\/[^"]+)"/g,
-      (_match, attr: string, file: string) => {
-        const fileUri = webview.asWebviewUri(
-          vscode.Uri.joinPath(webviewRoot, file),
-        );
-        return `${attr}="${fileUri}"`;
-      },
-    );
-
-    // Nonce para el script inline que setea window.__claudeOrchestrator.
-    // CSP `script-src` lo permite solo si declaramos el nonce —
-    // sin nonce y con 'unsafe-inline', VS Code rechaza el script.
-    const nonce = crypto.randomBytes(16).toString('base64');
-    const cfgJson = JSON.stringify({ mode: 'detail', agentId });
-    const inlineScript =
-      `<script nonce="${nonce}">window.__claudeOrchestrator = ${cfgJson};</script>`;
-
-    const csp = [
-      `default-src 'none'`,
-      `img-src ${webview.cspSource} data:`,
-      `script-src ${webview.cspSource} 'nonce-${nonce}'`,
-      `style-src ${webview.cspSource} 'unsafe-inline'`,
-      `font-src ${webview.cspSource}`,
-    ].join('; ');
-
-    // Orden importante: CSP primero, después el script inline con el
-    // nonce, después el bundle de Vite (su <script src="..."> ya
-    // está en el HTML original).
-    html = html.replace(
-      '<head>',
-      `<head>\n    <meta http-equiv="Content-Security-Policy" content="${csp}">\n    ${inlineScript}`,
-    );
-    return html;
   }
 
   dispose(): void {

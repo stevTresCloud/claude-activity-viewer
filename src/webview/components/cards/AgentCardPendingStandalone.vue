@@ -74,11 +74,11 @@ function onBodyClick(): void {
   transition: background-color 100ms ease;
 }
 .card:hover {
-  background: rgb(127 127 127 / 0.06);
+  background: var(--card-hover-bg-strong);
 }
 .card:focus-visible {
-  outline: 2px solid var(--color-info);
-  outline-offset: -2px;
+  outline: var(--card-focus-outline-width) solid var(--card-focus-outline-color);
+  outline-offset: var(--card-focus-outline-offset);
 }
 
 /* === Index badge — 20×20 (más grande que el compact 18×18) === */

@@ -127,11 +127,11 @@ const elapsedText = computed(() => {
   transition: background-color 100ms ease;
 }
 .card:hover {
-  background: rgb(127 127 127 / 0.04);
+  background: var(--card-hover-bg-subtle);
 }
 .card:focus-visible {
-  outline: 2px solid var(--color-info);
-  outline-offset: -2px;
+  outline: var(--card-focus-outline-width) solid var(--card-focus-outline-color);
+  outline-offset: var(--card-focus-outline-offset);
 }
 
 .line {

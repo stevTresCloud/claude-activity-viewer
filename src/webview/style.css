@@ -68,6 +68,26 @@
    * VS Code no proveen un "darker-than-sidebar" listo. */
   --background-index-badge: #0f0f0f;
 
+  /* === Card interaction tokens ===
+   * Las 6 cards (Running / RunningStandalone / Pending /
+   * PendingStandalone / Recent / Session) comparten el mismo patrón
+   * hover + focus. Vivían hardcoded en cada SFC; centralizados acá
+   * para que un re-theming de la "intensidad de hover" o el color
+   * del outline no toque 6 archivos. Mantenemos DOS niveles de hover:
+   *   - subtle (0.04): cards con contenido visual denso o animado
+   *     (Running con sweep bar + ContextBar, Session compacta) o
+   *     embebidas en un project group — un hover fuerte se siente
+   *     ruidoso.
+   *   - strong (0.06): cards más esparcidas y estáticas (Pending
+   *     standalone, Recent) que respiran y toleran/benefician un
+   *     hover más visible.
+   */
+  --card-hover-bg-subtle: rgb(127 127 127 / 0.04);
+  --card-hover-bg-strong: rgb(127 127 127 / 0.06);
+  --card-focus-outline-color: var(--color-info);
+  --card-focus-outline-width: 2px;
+  --card-focus-outline-offset: -2px;
+
   /* === Tipografía === */
   --font-ui: var(
     --vscode-font-family,

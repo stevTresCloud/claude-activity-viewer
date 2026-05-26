@@ -121,11 +121,11 @@ const isFailed = computed(() => props.agent.status === 'failed');
 }
 .card:hover {
   opacity: 1;
-  background: rgb(127 127 127 / 0.06);
+  background: var(--card-hover-bg-strong);
 }
 .card:focus-visible {
-  outline: 2px solid var(--color-info);
-  outline-offset: -2px;
+  outline: var(--card-focus-outline-width) solid var(--card-focus-outline-color);
+  outline-offset: var(--card-focus-outline-offset);
   opacity: 1;
 }
 .card.is-failed {
