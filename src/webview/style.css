@@ -72,3 +72,43 @@ body {
   color: var(--foreground);
   background: var(--background-view);
 }
+
+/* ================================================================
+ * Animaciones globales (HANDOFF §4)
+ *
+ * Definidas como keyframes en :root para que los componentes solo
+ * apliquen la clase (no redefinen el keyframe). Si el user activó
+ * "reduce motion" en su OS, las desactivamos — el contenido sigue
+ * siendo legible sin animación.
+ * ================================================================ */
+
+/* 4.1 — Pulse del status dot running (NOW PLAYING). */
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.4);
+    opacity: 0.55;
+  }
+}
+
+/* 4.2 — Sweeping progress bar (footer de cada card running).
+ * No se usa en 1.3.b, pero queda lista para 1.3.c. */
+@keyframes sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-pulse,
+  .sweep-bar {
+    animation: none !important;
+  }
+}
