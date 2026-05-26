@@ -16,5 +16,6 @@
     "noEmit": true,
     "types": []
   },
-  "include": ["src/webview/**/*", "src/shared/**/*"]
+  "include": ["src/webview/**/*", "src/shared/**/*"],
+  "exclude": ["src/webview/**/__tests__/**"]
 }
