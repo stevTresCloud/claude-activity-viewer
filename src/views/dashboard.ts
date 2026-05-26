@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import type { DashboardBridge } from '../dashboard/bridge';
+import type { DashboardEventToExtension } from '../shared/dashboard-protocol';
 
 export class DashboardViewProvider implements vscode.WebviewViewProvider {
   /**
@@ -31,6 +32,15 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly bridge: DashboardBridge,
+    /**
+     * Callback que recibe mensajes del webview (button Resume, botón
+     * Rescan, etc.). Lo configura extension.ts y delega al scanner
+     * controller / handlers correspondientes. Sin esto el provider
+     * no podría reaccionar al click de Resume.
+     */
+    private readonly onWebviewMessage?: (
+      msg: DashboardEventToExtension,
+    ) => void,
   ) {}
 
   /**
@@ -109,6 +119,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     // el listener viejo activo; sin el token, el dispose viejo
     // detacharía un attach posterior, dejando el bridge mudo.
     const token = this.bridge.attachWebview(webview);
+
+    // Webview → Extension: enchufamos el callback configurado por
+    // la extensión. Hoy maneja `request_resume_session` y
+    // `request_rescan`. Filtro de shape: ignoramos lo que no traiga
+    // un `type` string (defensivo contra mensajes ruido).
+    if (this.onWebviewMessage) {
+      webview.onDidReceiveMessage((raw: unknown) => {
+        if (!raw || typeof raw !== 'object') return;
+        const candidate = raw as { type?: unknown };
+        if (typeof candidate.type !== 'string') return;
+        this.onWebviewMessage!(raw as DashboardEventToExtension);
+      });
+    }
+
     webviewView.onDidDispose(() => {
       this.bridge.detachWebview(token);
     });

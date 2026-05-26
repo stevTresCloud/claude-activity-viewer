@@ -35,6 +35,7 @@
 
 import { computed, onBeforeUnmount, ref, watchEffect } from 'vue';
 import { useAgentsStore } from '../../stores/useAgentsStore';
+import { useScannerStore } from '../../stores/useScannerStore';
 import { useProjectFilter } from '../../composables/useProjectFilter';
 import { formatRelative } from '../../utils/format';
 import type { Project } from '../../types';
@@ -42,6 +43,7 @@ import ProjectSelectorRow from './ProjectSelectorRow.vue';
 import StatusDot from '../atoms/StatusDot.vue';
 
 const store = useAgentsStore();
+const scanner = useScannerStore();
 const { selectedProjectId, selectProject, clearFilter } = useProjectFilter();
 
 // === Estado local del popover ===
@@ -77,11 +79,62 @@ function countFor(projectName: string): number {
   return agentsByProject.value.get(projectName) ?? 0;
 }
 
+function sessionsFor(projectName: string): number {
+  return scanner.sessionCountFor(projectName);
+}
+
+/**
+ * Proyectos descubiertos en disco que NO aparecen en el store de
+ * agentes (no tienen actividad en esta sesión). Los mostramos en
+ * el bloque `inactive` del dropdown con count=0 + Ms para que el
+ * user pueda saltar al proyecto y ver su historial.
+ */
+const diskOnlyProjects = computed<Project[]>(() => {
+  const livedProjectNames = new Set(store.projects.map((p) => p.name));
+  const namesFromDisk = scanner.projectNamesFromDisk;
+  const out: Project[] = [];
+  for (const name of namesFromDisk) {
+    if (livedProjectNames.has(name)) continue;
+    out.push({
+      id: `p-${name}`,
+      name,
+      lifecycle: 'inactive',
+      lastUpdateIso: '',
+      activeTask: null,
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+});
+
+/**
+ * Lista combinada para el dropdown: el bloque `inactive` mezcla
+ * los proyectos sin agentes ya conocidos en el store con los que
+ * solo viven en disco.
+ */
+const inactiveCombined = computed<Project[]>(() => {
+  return [...store.projectsByLifecycle.inactive, ...diskOnlyProjects.value];
+});
+
+/**
+ * Total para el label del trigger ("All projects (N)"): el `N` de
+ * antes contaba solo proyectos con agentes; ahora también suma los
+ * diskeados sin agentes (mejor reflejo de lo que ve el user).
+ */
+const totalProjectsCount = computed<number>(
+  () => store.projects.length + diskOnlyProjects.value.length,
+);
+
 // === Proyecto actualmente seleccionado (para pintar el trigger) ===
 
 const selectedProject = computed<Project | null>(() => {
   if (!selectedProjectId.value) return null;
-  return store.projects.find((p) => p.id === selectedProjectId.value) ?? null;
+  // Buscamos también en proyectos solo-disco — Steven puede haber
+  // filtrado a un proyecto que aún no tiene actividad en sesión.
+  return (
+    store.projects.find((p) => p.id === selectedProjectId.value) ??
+    diskOnlyProjects.value.find((p) => p.id === selectedProjectId.value) ??
+    null
+  );
 });
 
 // === Sub line de cada row (active / idle Xh ago / inactive Xd ago) ===
@@ -95,6 +148,11 @@ function subLineFor(project: Project): string {
       return `${project.activeTask ?? '—'} · idle ${ago} ago`;
     }
     case 'inactive': {
+      // Proyectos solo-disco (sin agentes en sesión) tienen
+      // lastUpdateIso vacío y activeTask=null — el sub line saldría
+      // "— · inactive — ago". Lo omitimos para que el row quede
+      // limpio: el counter de sessions ya comunica que tiene historial.
+      if (!project.lastUpdateIso) return '';
       const ago = formatRelative(project.lastUpdateIso);
       return `${project.activeTask ?? '—'} · inactive ${ago} ago`;
     }
@@ -162,7 +220,7 @@ const triggerLabel = computed(() => {
   if (selectedProject.value) {
     return `${selectedProject.value.name} (${countFor(selectedProject.value.name)})`;
   }
-  return `All projects (${store.projects.length})`;
+  return `All projects (${totalProjectsCount.value})`;
 });
 </script>
 
@@ -207,7 +265,7 @@ const triggerLabel = computed(() => {
       <ProjectSelectorRow
         variant="all"
         label="All projects"
-        :count="store.projects.length"
+        :count="totalProjectsCount"
         :selected="selectedProjectId === null"
         @select="onSelectAll"
       />
@@ -225,6 +283,7 @@ const triggerLabel = computed(() => {
         variant="active"
         :label="p.name"
         :count="countFor(p.name)"
+        :sessions-count="sessionsFor(p.name)"
         :sub="subLineFor(p)"
         :selected="selectedProjectId === p.id"
         @select="onSelectProject(p.id)"
@@ -246,27 +305,30 @@ const triggerLabel = computed(() => {
         variant="idle"
         :label="p.name"
         :count="countFor(p.name)"
+        :sessions-count="sessionsFor(p.name)"
         :sub="subLineFor(p)"
         :selected="selectedProjectId === p.id"
         @select="onSelectProject(p.id)"
       />
 
-      <!-- Divider entre idle e inactive -->
+      <!-- Divider entre idle e inactive (combinado disco + store) -->
       <div
         v-if="
-          store.projectsByLifecycle.idle.length > 0 &&
-          store.projectsByLifecycle.inactive.length > 0
+          (store.projectsByLifecycle.idle.length > 0 ||
+            store.projectsByLifecycle.active.length > 0) &&
+          inactiveCombined.length > 0
         "
         class="divider"
       />
 
-      <!-- Inactive -->
+      <!-- Inactive (incluye proyectos solo-disco sin agentes) -->
       <ProjectSelectorRow
-        v-for="p in store.projectsByLifecycle.inactive"
+        v-for="p in inactiveCombined"
         :key="p.id"
         variant="inactive"
         :label="p.name"
         :count="countFor(p.name)"
+        :sessions-count="sessionsFor(p.name)"
         :sub="subLineFor(p)"
         :selected="selectedProjectId === p.id"
         @select="onSelectProject(p.id)"

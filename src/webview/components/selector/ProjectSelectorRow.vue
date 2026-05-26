@@ -30,12 +30,18 @@ const props = withDefaults(
     variant: RowVariant;
     label: string;
     count: number;
+    /**
+     * Sesiones históricas en disco del proyecto. Cuando > 0, el
+     * counter se renderea como "(N · Ms)" donde N=agents y M=sessions;
+     * cuando es 0 (o el caso "all"), cae al formato simple "(N)".
+     */
+    sessionsCount?: number;
     /** Línea 2 opcional ("tarea_NNNN · active", etc.). */
     sub?: string;
     /** Resaltado cuando es el filtro actualmente activo. */
     selected?: boolean;
   }>(),
-  { sub: '', selected: false },
+  { sub: '', selected: false, sessionsCount: 0 },
 );
 
 defineEmits<{
@@ -53,6 +59,18 @@ const dotKind = computed(() => {
 });
 
 const isDimmed = computed(() => props.variant === 'inactive');
+
+/**
+ * Counter visible. Sin sesiones → formato simple "(N)". Con
+ * sesiones → "(N · Ms)" donde N=agents y M=sessions. La notación
+ * compacta evita inflar el ancho del row.
+ */
+const counterLabel = computed(() => {
+  if (props.sessionsCount > 0) {
+    return `(${props.count} · ${props.sessionsCount}s)`;
+  }
+  return `(${props.count})`;
+});
 </script>
 
 <template>
@@ -67,7 +85,7 @@ const isDimmed = computed(() => props.variant === 'inactive');
     <div class="row-1">
       <StatusDot :status="dotKind" />
       <span class="label">{{ label }}</span>
-      <span class="count">({{ count }})</span>
+      <span class="count">{{ counterLabel }}</span>
     </div>
 
     <!-- === Row 2: sub line opcional === -->

@@ -75,6 +75,17 @@ export interface AgentSnapshot {
   name: string;
   status: AgentStatus;
 
+  /**
+   * sessionId del SDK (capturado en `agent_runner` cuando el SDK lo
+   * emite). Opcional porque el SDK puede tardar 1-2 frames en
+   * proveerlo y el bridge ya empieza a emitir snapshots antes.
+   *
+   * Sirve para dedup contra sesiones históricas en disco: una
+   * sesión con `entrypoint=sdk-ts` y mismo sessionId que un agente
+   * vivo NO debe duplicarse en PAST SESSIONS.
+   */
+  sessionId?: string;
+
   // Agrupación visual (cards del dashboard)
   project: string;
   task: string;
@@ -187,22 +198,102 @@ export type DashboardEventToWebview =
       type: 'agent_completed';
       agentId: string;
       result: AgentCompletedResult;
-    };
+    }
+  /**
+   * Resultado del project scanner: lista de proyectos descubiertos
+   * leyendo `claudeOrchestrator.projectsRoot` desde el filesystem.
+   * El webview los mergea contra los derivados de agentes vivos.
+   */
+  | { type: 'projects_from_disk'; projects: ProjectFromDisk[]; scannedAtIso: string }
+  /**
+   * Resultado del session scanner: lista de sesiones históricas
+   * leídas de `~/.claude/projects/<encoded-cwd>/*.jsonl`. El webview
+   * las deduplica contra agentes vivos por sessionId+entrypoint.
+   */
+  | { type: 'sessions_from_disk'; sessions: SessionFromDisk[]; scannedAtIso: string };
 
 // === Eventos Webview → Extension (declarados, sin handler todavía) ===
 
 /**
  * Shape de los eventos que el webview enviará al extension host
- * vía `vscode.postMessage(...)`. Declaramos el contrato pero NO
- * cableamos handlers — el bridge ignora silenciosamente cualquier
- * message webview→extension. La UI tampoco los emite todavía: los
- * botones Cancel/Open/Send Message son decorativos.
+ * vía `vscode.postMessage(...)`.
  *
- * Documentar el shape ahora evita el costo de "inventarlo al
- * implementar" y garantiza que cualquier listener pre-emptivo
- * respete el contrato final.
+ * Hoy cableados:
+ *   - request_resume_session: el botón Resume de una SessionCard.
+ *   - request_rescan: el botón "Rescan" del Toolbar.
+ *
+ * Reservados (decorativos en la UI, sin handler):
+ *   - request_cancel, request_open, request_send_message.
  */
 export type DashboardEventToExtension =
   | { type: 'request_cancel'; agentId: string }
   | { type: 'request_open'; agentId: string }
-  | { type: 'request_send_message'; agentId: string; message: string };
+  | { type: 'request_send_message'; agentId: string; message: string }
+  /** Reanudar una sesión histórica abriendo `claude --resume <id>` en terminal nueva. */
+  | { type: 'request_resume_session'; sessionId: string; cwd: string; firstPrompt?: string }
+  /** Forzar re-scan inmediato de projects+sessions (botón manual del Toolbar). */
+  | { type: 'request_rescan' };
+
+// === Entidades para los scanners (filesystem-derived) ===
+
+/**
+ * Proyecto descubierto por el project scanner leyendo subfolders
+ * directos de `claudeOrchestrator.projectsRoot`. Existe aunque no
+ * haya agentes lanzados todavía — el dropdown del selector los
+ * muestra con count `(0 agents · M sessions)`.
+ */
+export interface ProjectFromDisk {
+  /** Path absoluto canónico del proyecto. Usado como id estable. */
+  path: string;
+  /** Basename del path. Lo que se muestra en la UI. */
+  name: string;
+  /** Rama git actual. Cadena vacía si no es repo git o detached HEAD. */
+  branch: string;
+  /** True si `git status --porcelain` reporta cambios. */
+  dirty: boolean;
+}
+
+/**
+ * Sesión histórica descubierta por el session scanner. Cada sesión
+ * mapea 1:1 a un `*.jsonl` bajo `~/.claude/projects/<encoded-cwd>/`.
+ *
+ * El cwd autoritativo viene del campo `cwd` interno del JSONL (no
+ * del nombre de carpeta, que NO es bijection reversible cuando el
+ * path original contiene guiones).
+ */
+export interface SessionFromDisk {
+  /** Path absoluto al archivo `.jsonl` (id estable, único). */
+  filePath: string;
+  /** sessionId del SDK (el del header del JSONL). */
+  sessionId: string;
+  /** cwd absoluto reportado dentro del JSONL. */
+  cwd: string;
+  /** project derivado con la misma lógica que los agentes vivos. */
+  project: string;
+  /** task derivado (vacío si no matchea convención `<root>/<proj>/tasks/<task>`). */
+  task: string;
+  /** Branch capturada por Claude Code en el header. Puede ser "HEAD" (detached). */
+  branch: string;
+  /** Primer prompt del user, limpiado de `<ide_*>...</ide_*>` y truncado a 80 chars. */
+  firstPrompt: string;
+  /**
+   * Versión más larga del primer prompt (limpia, hasta ~400 chars).
+   * Se muestra en SessionCard cuando el user activa expand. Vale
+   * mantenerlo separado de `firstPrompt` para que la lista
+   * compacta no pague el costo de strings largos en el wire por
+   * cada sesión.
+   */
+  firstPromptFull: string;
+  /** ISO 8601 del primer evento user. */
+  startedAtIso: string;
+  /** ISO 8601 del último evento parseable. Igual a startedAtIso si solo hay 1 line. */
+  endedAtIso: string;
+  /** Estado inferido del shape del último evento del JSONL. */
+  status: 'done' | 'failed' | 'interrupted';
+  /**
+   * Quién originó la sesión. `claude-vscode` = abierta por Steven en
+   * su VS Code chat. `sdk-ts` = abierta por nuestro orchestrator.
+   * `cli` = `claude` en terminal. Otros = lo que reporte el JSONL.
+   */
+  entrypoint: string;
+}

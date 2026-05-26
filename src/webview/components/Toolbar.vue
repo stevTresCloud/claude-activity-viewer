@@ -27,13 +27,18 @@
  * filtros adicionales y menú de más acciones.
  */
 
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useAgentsStore } from '../stores/useAgentsStore';
+import { useScannerStore } from '../stores/useScannerStore';
 import { useProjectFilter } from '../composables/useProjectFilter';
+import { useNow } from '../composables/useNow';
+import { postToExtension } from '../composables/usePostToExtension';
+import { formatRelative } from '../utils/format';
 import ProjectSelector from './selector/ProjectSelector.vue';
 import ProjectContextLine from './sections/ProjectContextLine.vue';
 
 const store = useAgentsStore();
+const scanner = useScannerStore();
 const { selectedProjectId } = useProjectFilter();
 
 // === Resolver projectName del id seleccionado ===
@@ -60,6 +65,49 @@ interface ContextInfo {
   branch: string | null;
   taskCount: number;
 }
+
+// === Rescan button state ===
+//
+// El user controla cuándo rescanear (default scannerRefreshSec=0).
+// Mostramos "last scan Xs ago" calculado contra useNow() para que
+// la etiqueta progrese sola sin trigger manual. `scanning` queda
+// true mientras esperamos que el extension host responda; lo
+// destrabamos cuando llega un evento `projects_from_disk` o tras
+// un timeout defensivo (3s sin respuesta → asumir que algo falló).
+
+const scanning = ref(false);
+const now = useNow();
+
+const lastScanLabel = computed<string>(() => {
+  // Leemos now.value para que el computed re-evalúe con el tick.
+  void now.value;
+  if (scanning.value) return 'scanning…';
+  if (!scanner.lastScanIso) return 'no scan yet';
+  return `last scan ${formatRelative(scanner.lastScanIso)} ago`;
+});
+
+function onRescan(): void {
+  if (scanning.value) return;
+  scanning.value = true;
+  postToExtension({ type: 'request_rescan' });
+  // Timeout defensivo: si por algún motivo el extension host no
+  // responde (process murió, etc.), liberamos el botón a los 5s
+  // en vez de dejar el spinner colgado para siempre.
+  setTimeout(() => {
+    scanning.value = false;
+  }, 5_000);
+}
+
+// Cuando llega un evento `projects_from_disk` o `sessions_from_disk`,
+// el store actualiza `lastScanIso`. Observamos eso para apagar el
+// spinner antes del timeout. Usar watch acá evita depender del
+// timeout en el happy path.
+watch(
+  () => scanner.lastScanIso,
+  () => {
+    scanning.value = false;
+  },
+);
 
 const contextInfo = computed<ContextInfo | null>(() => {
   if (!selectedProjectName.value) return null;
@@ -89,12 +137,27 @@ const contextInfo = computed<ContextInfo | null>(() => {
 
 <template>
   <div class="toolbar">
-    <!-- === Title row + 3 botones decorativos === -->
+    <!-- === Title row + scan label + 3 botones === -->
     <div class="title-row">
       <span class="title">CLAUDE AGENTS</span>
+      <span class="scan-label" :class="{ 'is-scanning': scanning }">
+        {{ lastScanLabel }}
+      </span>
       <div class="toolbar-actions">
-        <button type="button" class="toolbar-btn" aria-label="new batch">
-          <i class="codicon codicon-add" />
+        <!-- Rescan: re-lee projectsRoot + ~/.claude/projects desde
+             disco. Default scannerRefreshSec=0 (off), así que es
+             el único disparador rutinario. Disabled mientras corre
+             un scan para no encolar peticiones. -->
+        <button
+          type="button"
+          class="toolbar-btn"
+          :class="{ 'is-busy': scanning }"
+          aria-label="Rescan projects and sessions"
+          :title="`Rescan projects and sessions — ${lastScanLabel}`"
+          :disabled="scanning"
+          @click="onRescan"
+        >
+          <i class="codicon codicon-refresh" />
         </button>
         <button type="button" class="toolbar-btn" aria-label="filter">
           <i class="codicon codicon-filter" />
@@ -143,6 +206,26 @@ const contextInfo = computed<ContextInfo | null>(() => {
   letter-spacing: 0.6px;
   text-transform: uppercase;
   color: var(--foreground);
+  flex-shrink: 0;
+}
+
+/* === Scan label === */
+/* Estado discreto al lado del título — el user sabe cuándo fue el
+ * último refresh sin tener que pasar el mouse sobre el botón. */
+.scan-label {
+  flex: 1;
+  margin-left: 10px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--foreground-muted);
+  opacity: 0.7;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.scan-label.is-scanning {
+  opacity: 1;
+  font-style: italic;
 }
 
 .toolbar-actions {
@@ -167,6 +250,19 @@ const contextInfo = computed<ContextInfo | null>(() => {
 .toolbar-btn:hover {
   background: rgb(255 255 255 / 0.06);
   opacity: 1;
+}
+.toolbar-btn:disabled {
+  cursor: progress;
+  opacity: 0.4;
+}
+/* Spinner durante el rescan: rotación lenta del icono refresh. */
+.toolbar-btn.is-busy .codicon-refresh {
+  animation: rescan-spin 0.9s linear infinite;
+}
+@keyframes rescan-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .toolbar-btn .codicon {
   font-size: 14px;

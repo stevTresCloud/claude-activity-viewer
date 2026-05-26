@@ -5,6 +5,7 @@ import { AgentRunner } from './runtime/agent-runner';
 import { OrchestratorHttpServer } from './mcp/http-transport';
 import { DashboardViewProvider } from './views/dashboard';
 import { DashboardBridge } from './dashboard/bridge';
+import { ScannerController } from './dashboard/scanner-controller';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -127,13 +128,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
 
+  // === Scanner controller ===
+  // Orquesta los scanners de proyectos + sesiones, su auto-refresh
+  // y el handler de Resume. Arrancamos post-hydrate para que el
+  // primer scan vea los agentes vivos del state persistido (no se
+  // dupliquen en PAST SESSIONS si la sesión sigue corriendo).
+  const scanner = new ScannerController({ context, channel, bridge });
+  scanner.start();
+  context.subscriptions.push({ dispose: () => scanner.stop() });
+
+  // Comando palette: re-scan manual. Útil cuando el user agrega un
+  // proyecto al filesystem y no quiere esperar al próximo tick.
+  const rescanCmd = vscode.commands.registerCommand(
+    'claudeOrchestrator.rescan',
+    () => {
+      void scanner.rescan('manual');
+    },
+  );
+  context.subscriptions.push(rescanCmd);
+
   // === Dashboard webview (sidebar) ===
   // Registramos el provider que VS Code instancia cuando el user abre
   // el Activity Bar de Claude Orchestrator. retainContextWhenHidden
   // mantiene vivo el estado de Vue/Pinia mientras el sidebar está
   // colapsado — el costo (~5MB RAM) es preferible a re-hidratar todo
   // cada vez que se reabre.
-  const dashboardProvider = new DashboardViewProvider(context.extensionUri, bridge);
+  const dashboardProvider = new DashboardViewProvider(
+    context.extensionUri,
+    bridge,
+    (msg) => scanner.handleMessage(msg),
+  );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewType,

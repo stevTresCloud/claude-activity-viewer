@@ -21,7 +21,7 @@ import { computed } from 'vue';
 import StatusDot from '../atoms/StatusDot.vue';
 import FailedBadge from '../atoms/FailedBadge.vue';
 
-export type SectionKind = 'NOW PLAYING' | 'UP NEXT' | 'RECENT';
+export type SectionKind = 'NOW PLAYING' | 'UP NEXT' | 'RECENT' | 'PAST SESSIONS';
 
 const props = withDefaults(
   defineProps<{

@@ -28,10 +28,12 @@
 
 import { onMounted, onUnmounted } from 'vue';
 import { useAgentsStore } from '../stores/useAgentsStore';
+import { useScannerStore } from '../stores/useScannerStore';
 import type { DashboardEventToWebview } from '../../shared/dashboard-protocol';
 
 export function useDashboardBridge(): void {
-  const store = useAgentsStore();
+  const agents = useAgentsStore();
+  const scanner = useScannerStore();
 
   // Tipamos el message handler con DashboardEventToWebview para
   // que el switch narrow-e cada case sin casts.
@@ -46,19 +48,25 @@ export function useDashboardBridge(): void {
 
     switch (data.type) {
       case 'agent_list':
-        store.applyAgentList(data.agents);
+        agents.applyAgentList(data.agents);
         break;
       case 'agent_created':
-        store.addAgent(data.agent);
+        agents.addAgent(data.agent);
         break;
       case 'agent_status_changed':
-        store.updateAgentStatus(data.agentId, data.status, data.metadata);
+        agents.updateAgentStatus(data.agentId, data.status, data.metadata);
         break;
       case 'agent_log':
-        store.appendLog(data.agentId, data.entry);
+        agents.appendLog(data.agentId, data.entry);
         break;
       case 'agent_completed':
-        store.markAgentCompleted(data.agentId, data.result);
+        agents.markAgentCompleted(data.agentId, data.result);
+        break;
+      case 'projects_from_disk':
+        scanner.applyProjectsFromDisk(data.projects, data.scannedAtIso);
+        break;
+      case 'sessions_from_disk':
+        scanner.applySessionsFromDisk(data.sessions, data.scannedAtIso);
         break;
       default: {
         // Forward-compat: si el bridge agrega un evento nuevo no

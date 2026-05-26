@@ -28,6 +28,10 @@
       {
         "command": "claudeOrchestrator.cancelTestAgent",
         "title": "Claude Orchestrator: Cancel Test Agent"
+      },
+      {
+        "command": "claudeOrchestrator.rescan",
+        "title": "Claude Orchestrator: Rescan projects and sessions"
       }
     ],
     "viewsContainers": {
@@ -58,6 +62,27 @@
           },
           "default": [],
           "description": "Absolute paths. Each direct subfolder of a path here is treated as a project. Used to derive project/task labels in the dashboard from the agent cwd. Tildes (~) are expanded to the user home."
+        },
+        "claudeOrchestrator.scannerRefreshSec": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Auto-refresh interval (seconds) for the project + session scanner. 0 disables auto-refresh (default) — use the 'Rescan' button in the dashboard toolbar or the 'Rescan projects and sessions' command. Re-scanning re-parses every .jsonl from disk; with many projects (50+) keep this at 0 to avoid recurring I/O spikes."
+        },
+        "claudeOrchestrator.resumeConfirm": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, show a confirmation dialog before resuming a past Claude session."
+        },
+        "claudeOrchestrator.resumeIn": {
+          "type": "string",
+          "enum": ["chat", "terminal"],
+          "default": "chat",
+          "enumDescriptions": [
+            "Open the resumed session in the Claude Code sidebar chat (requires the 'anthropic.claude-code' extension). Falls back to terminal if the extension is missing.",
+            "Open the resumed session in a new VS Code terminal running 'claude --resume <id>'."
+          ],
+          "description": "Where to open a past session when clicking Resume. 'chat' uses the Claude Code extension's URI handler; 'terminal' spawns a new VS Code terminal."
         }
       }
     }

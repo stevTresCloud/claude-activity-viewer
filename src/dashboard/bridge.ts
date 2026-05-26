@@ -132,6 +132,12 @@ export class DashboardBridge {
   // con agent_list completo.
   private webview: vscode.Webview | null = null;
 
+  // Callbacks invocados después de cada `attachWebview`. Los usa
+  // el scanner-controller para re-emitir su último resultado: sin
+  // esto, cerrar y reabrir el sidebar deja la sección PAST SESSIONS
+  // vacía hasta el siguiente tick del auto-refresh.
+  private readonly attachCallbacks: Array<() => void> = [];
+
   // Persistencia debounced: cada evento agenda un flush, sucesivos
   // mientras el timer corre se colapsan en uno solo. Sin esto, un
   // agente verboso (cientos de tool_use/sec) generaría N writes
@@ -217,7 +223,34 @@ export class DashboardBridge {
       `[${ts()}] [bridge] webview attached, hydrating ${agents.length} agents`,
     );
     this.post({ type: 'agent_list', agents });
+    // Notificamos a los suscriptores (scanner-controller) para que
+    // re-emitan su último cache al webview. Fire-and-forget; un
+    // callback que tire no debe romper attach.
+    for (const cb of this.attachCallbacks) {
+      try {
+        cb();
+      } catch (err) {
+        this.channel.appendLine(
+          `[${ts()}] [bridge] attach callback error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     return webview;
+  }
+
+  /**
+   * Registra un callback que se invoca cada vez que un webview
+   * nuevo se attache. Pensado para que módulos auxiliares
+   * (scanner-controller) puedan re-hidratar su slice del state.
+   *
+   * Retorna una función de des-registro para limpieza si hace falta.
+   */
+  onAttach(cb: () => void): () => void {
+    this.attachCallbacks.push(cb);
+    return () => {
+      const i = this.attachCallbacks.indexOf(cb);
+      if (i >= 0) this.attachCallbacks.splice(i, 1);
+    };
   }
 
   /**
@@ -484,6 +517,16 @@ export class DashboardBridge {
     this.webview.postMessage(event);
   }
 
+  /**
+   * Entry point público para que controladores externos (ej. el
+   * scanner) publiquen eventos al webview sin tocar la referencia
+   * privada `this.webview`. Mismo fire-and-forget que el post
+   * interno: si no hay webview attached, el evento se descarta.
+   */
+  emit(event: DashboardEventToWebview): void {
+    this.post(event);
+  }
+
   // ====================================================================
   // === Persistencia ====================================================
   // ====================================================================
@@ -624,6 +667,42 @@ export function deriveProjectContext(
   override?: string,
   workspaceFolders?: readonly string[],
 ): { project: string; task: string; branch: string } {
+  const { project, task } = deriveProjectContextPure(
+    cwd,
+    projectsRoot,
+    override,
+    workspaceFolders,
+  );
+  const branch = readGitBranch(cwd);
+  return { project, task, branch };
+}
+
+/**
+ * Variante 100% pura de `deriveProjectContext`: NO ejecuta `git`.
+ *
+ * Hot path del session scanner — clasifica cada uno de los ~260
+ * `.jsonl` históricos por proyecto. Si reusáramos la versión con
+ * git, harían N forks de `git branch` síncronos en el event loop
+ * del extension host por cada scan (cada 60s con auto-refresh
+ * default), congelando VS Code varios segundos.
+ *
+ * El scanner además ya tiene el `gitBranch` autoritativo dentro
+ * del propio JSONL — no necesita re-calcularlo del filesystem.
+ *
+ * Acepta `firstUserPrompt` opcional para activar la heurística de
+ * derivación desde el contenido del prompt: el cwd del JSONL viene
+ * del workspace folder de VS Code, no de la subcarpeta donde está
+ * la tarea. Si el prompt menciona un path absoluto dentro de un
+ * projectsRoot, ese path es mejor señal que el cwd genérico.
+ */
+export function deriveProjectContextPure(
+  cwd: string,
+  projectsRoot: string[],
+  override?: string,
+  workspaceFolders?: readonly string[],
+  firstUserPrompt?: string,
+  signalText?: string,
+): { project: string; task: string } {
   const normCwd = normalizePath(cwd);
   let project = '';
   let task = '';
@@ -631,8 +710,9 @@ export function deriveProjectContext(
   if (override) {
     project = override;
   } else {
-    // Match contra projectsRoot (tiene prioridad sobre workspaceFolders
-    // porque es el setting explícito que el user controla).
+    // === Paso 1: match cwd contra projectsRoot ===
+    // Caso ideal — workspace = ~/git19/docs/proj/. El user lo controla
+    // explícito y es prioridad sobre todo lo demás.
     for (const root of projectsRoot) {
       const normRoot = normalizePath(root);
       if (isSubPath(normCwd, normRoot)) {
@@ -640,7 +720,6 @@ export function deriveProjectContext(
         const segments = rel.split('/');
         if (segments[0]) {
           project = segments[0];
-          // Si existe `<project>/tasks/<task>/...` extraer task.
           if (segments[1] === 'tasks' && segments[2]) {
             task = segments[2];
           }
@@ -649,7 +728,31 @@ export function deriveProjectContext(
       }
     }
 
-    // Workspace folders (lectura desde vscode si no se pasa override).
+    // === Paso 2: heurística del prompt ===
+    // ANTES que workspace folders porque el prompt apunta a un
+    // subpath específico (proyecto/tarea real) mientras que el
+    // workspace folder es típicamente un parent genérico (~/git19/).
+    // Ejemplo del bug que dispara este orden: workspace=~/git18,
+    // cwd=/home/trescloud/git18, prompts mencionan
+    // docs/ecuadorian-hr18/... → queremos `ecuadorian-hr18`, NO
+    // `git18` (basename del workspace).
+    if (!project && projectsRoot.length > 0) {
+      const haystack = [firstUserPrompt, signalText]
+        .filter(Boolean)
+        .join('\n');
+      if (haystack) {
+        const fromPrompt = derivePathFromPrompt(haystack, projectsRoot, normCwd);
+        if (fromPrompt) {
+          project = fromPrompt.project;
+          task = fromPrompt.task;
+        }
+      }
+    }
+
+    // === Paso 3: match cwd contra workspace folders ===
+    // Fallback genérico cuando el prompt no aportó señal. Pasa con
+    // sesiones que no mencionan paths específicos en ningún user
+    // prompt ni en tool_use.
     if (!project) {
       const folders = workspaceFolders ?? readWorkspaceFolders();
       for (const folder of folders) {
@@ -661,13 +764,94 @@ export function deriveProjectContext(
       }
     }
 
+    // === Paso 4: fallback final ===
     if (!project) {
       project = path.basename(normCwd) || normCwd;
     }
   }
 
-  const branch = readGitBranch(cwd);
-  return { project, task, branch };
+  return { project, task };
+}
+
+/**
+ * Busca el primer path en `prompt` que matchee algún `projectsRoot`
+ * y devuelve `{project, task}` derivados. Acepta:
+ *
+ *   - Paths absolutos: `/home/user/git19/docs/proj/file.py`.
+ *   - Paths relativos (si `baseCwd` se pasa): `docs/proj/file.py`
+ *     resuelve contra baseCwd → matchea projectsRoot. Esto cubre
+ *     el caso "tool_use file_path=docs/x/y.py" cuando Claude
+ *     trabaja desde el workspace folder.
+ *
+ * Regex conservador: solo letras, números, `._-` en cada segmento,
+ * mínimo 2 segmentos. Excluye URLs y paths con espacios.
+ *
+ * Exportable para tests; null si no encuentra match.
+ */
+export function derivePathFromPrompt(
+  prompt: string,
+  projectsRoot: string[],
+  baseCwd?: string,
+): { project: string; task: string } | null {
+  // Path absoluto: `/foo/bar/baz`. Lookbehind para evitar matchear
+  // "//comentarios" o "http://...".
+  const ABS_PATH_REGEX = /(?:^|[\s(`"'])(\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+)/g;
+  // Path relativo: `foo/bar/baz` (mínimo 2 segmentos, no precedido
+  // de `/` o letras — esto excluye paths absolutos y URLs como
+  // "github.com/user/repo"). Usado solo cuando baseCwd está
+  // disponible para resolverlos.
+  const REL_PATH_REGEX =
+    /(?:^|[\s(`"'])((?:[A-Za-z0-9._-]+\/){1,}[A-Za-z0-9._-]+)/g;
+
+  const normRoots = projectsRoot.map((r) => normalizePath(r));
+
+  // Helper: intenta matchear un path canonicalizado contra los roots.
+  function tryMatch(candidate: string): { project: string; task: string } | null {
+    for (const root of normRoots) {
+      if (isSubPath(candidate, root)) {
+        const rel = candidate.slice(root.length + 1);
+        const segments = rel.split('/');
+        if (segments[0]) {
+          const project = segments[0];
+          let task = '';
+          if (segments[1] === 'tasks' && segments[2]) {
+            task = segments[2];
+          }
+          return { project, task };
+        }
+      }
+    }
+    return null;
+  }
+
+  // === Pass 1: paths absolutos ===
+  let m: RegExpExecArray | null;
+  while ((m = ABS_PATH_REGEX.exec(prompt)) !== null) {
+    const matched = tryMatch(normalizePath(m[1]));
+    if (matched) return matched;
+  }
+
+  // === Pass 2: paths relativos resueltos contra baseCwd ===
+  // Solo si tenemos baseCwd (el cwd del .jsonl) — sin él no podemos
+  // resolver. Esto captura "file_path: docs/equipo-ya/foo.py" en
+  // tool_use de Claude cuando estaba en /home/trescloud/git19.
+  if (baseCwd) {
+    const normBase = normalizePath(baseCwd);
+    while ((m = REL_PATH_REGEX.exec(prompt)) !== null) {
+      const raw = m[1];
+      // Skip si arranca con segmento conocido como URL ("https",
+      // "http", "ftp") o esquema con dos puntos.
+      if (/^(https?|ftp|file|git):/i.test(raw)) continue;
+      // Skip si parece dominio (ej. "github.com/user/repo") — un
+      // primer segmento con punto y todo letras suele ser host.
+      const firstSeg = raw.split('/')[0];
+      if (/\./.test(firstSeg) && /^[a-z0-9.-]+$/i.test(firstSeg)) continue;
+      const resolved = normalizePath(path.join(normBase, raw));
+      const matched = tryMatch(resolved);
+      if (matched) return matched;
+    }
+  }
+  return null;
 }
 
 /**
