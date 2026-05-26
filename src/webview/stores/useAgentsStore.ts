@@ -323,8 +323,12 @@ const AGENTS: Agent[] = [
  * derivados sean reproducibles (idle vs inactive depende de "ahora
  * - completed_at >= 24h"). En 1.4 esto pasa a Date.now() real y
  * los timestamps los emite el backend.
+ *
+ * Exportado para que los helpers de format (utils/format.ts) lo
+ * usen como "now" al calcular "X ago" sobre la mock data, sin
+ * tener que duplicar el literal en dos lugares.
  */
-const MOCK_NOW_ISO = '2026-05-25T14:34:30Z';
+export const MOCK_NOW_ISO = '2026-05-25T14:34:30Z';
 const MOCK_NOW_MS = new Date(MOCK_NOW_ISO).getTime();
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 

@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// Mientras dura esta sub-fase, App.vue renderea solo el showcase
-// de átomos. En 1.3.c esto pasa a la vista real (sections + cards)
-// y el showcase queda accesible para regression visual on-demand.
+// App.vue — root del webview.
+//
+// 1.3.c rota el render del AtomShowcase a la vista All projects.
+// AtomShowcase queda en disco (src/webview/views/AtomShowcase.vue)
+// para usar como regression visual on-demand si se tocan átomos.
 
-import AtomShowcase from './views/AtomShowcase.vue';
+import AllProjectsView from './views/AllProjectsView.vue';
 </script>
 
 <template>
@@ -15,13 +17,15 @@ import AtomShowcase from './views/AtomShowcase.vue';
       fontFamily: 'var(--font-ui)',
     }"
   >
-    <AtomShowcase />
+    <AllProjectsView />
   </main>
 </template>
 
 <style scoped>
+/* El padding interno de cada bloque lo manejan los componentes
+ * (toolbar trae su propio padding, section-body trae el suyo).
+ * Acá solo garantizamos altura completa del viewport. */
 .container {
   min-height: 100vh;
-  padding: 12px;
 }
 </style>
