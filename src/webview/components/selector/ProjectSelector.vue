@@ -34,7 +34,7 @@
  */
 
 import { computed, onBeforeUnmount, ref, watchEffect } from 'vue';
-import { useAgentsStore, MOCK_NOW_ISO } from '../../stores/useAgentsStore';
+import { useAgentsStore } from '../../stores/useAgentsStore';
 import { useProjectFilter } from '../../composables/useProjectFilter';
 import { formatRelative } from '../../utils/format';
 import type { Project } from '../../types';
@@ -91,11 +91,11 @@ function subLineFor(project: Project): string {
     case 'active':
       return `${project.activeTask ?? '—'} · active`;
     case 'idle': {
-      const ago = formatRelative(project.lastUpdateIso, MOCK_NOW_ISO);
+      const ago = formatRelative(project.lastUpdateIso);
       return `${project.activeTask ?? '—'} · idle ${ago} ago`;
     }
     case 'inactive': {
-      const ago = formatRelative(project.lastUpdateIso, MOCK_NOW_ISO);
+      const ago = formatRelative(project.lastUpdateIso);
       return `${project.activeTask ?? '—'} · inactive ${ago} ago`;
     }
   }

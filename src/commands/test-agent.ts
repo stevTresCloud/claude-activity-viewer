@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
-import type { AgentRunner } from '../runtime/agent-runner';
-import { logAgentEvent, ts } from '../runtime/log';
+import type { DashboardBridge } from '../dashboard/bridge';
+import { ts } from '../runtime/log';
 
 // Prompt fijo del comando "Test Agent". Pensado para ejercer el ciclo
-// completo SDK → runner → OutputChannel + dar tiempo a cancelar mid-stream.
+// completo SDK → bridge → webview + dar tiempo a cancelar mid-stream.
 // Usa tools (Glob + Read) sobre el cwd sin modificar archivos.
 const TEST_PROMPT =
   'Listá los archivos .ts dentro de src/ del directorio actual. ' +
@@ -11,81 +11,79 @@ const TEST_PROMPT =
   'No edites nada.';
 
 /**
- * Registra los comandos del palette para probar un agente único.
+ * Registra los comandos del palette para lanzar/cancelar un agente
+ * de prueba. Sirve para validar el flujo end-to-end sin necesidad
+ * de un chat externo Claude Code; útil en EDH para iterar
+ * cambios al bridge y al webview.
  *
- * Soporta UN test agent a la vez. Múltiples agentes en paralelo entran
- * más adelante cuando el dashboard kanban exista (y demanda compartir el
- * runner con el MCP server, no instanciar uno propio).
+ * El comando `testAgent` lanza vía `bridge.spawn` — exactamente el
+ * mismo path que usa el handler MCP. Eso garantiza que lo que
+ * vemos en el dashboard refleja lo que un chat externo vería.
+ *
+ * El guard "uno a la vez" de versiones anteriores desaparece: el
+ * bridge soporta N agentes concurrentes. Mantenemos un set de
+ * agentIds activos lanzados por el palette para que el comando
+ * cancel sepa a quién matar (el del último spawn).
  *
  * @param context  contexto de la extensión (para registrar disposables).
  * @param channel  OutputChannel compartido donde se loggean los eventos.
- * @param runner   `AgentRunner` compartido con el resto de la extensión.
+ * @param bridge   bridge compartido — fuente de verdad del registry.
  */
 export function registerTestAgentCommands(
   context: vscode.ExtensionContext,
   channel: vscode.OutputChannel,
-  runner: AgentRunner,
+  bridge: DashboardBridge,
 ): void {
-  // Estado de la corrida activa (si hay). Cerrar/cancelar este controller
-  // dispara el bridge interno del runner que aborta el subprocess SDK.
-  let activeAbort: AbortController | null = null;
+  // Pila de agentIds lanzados por la paleta. El cancel apunta al más
+  // reciente — comportamiento intuitivo cuando uno está iterando F5.
+  const palette: string[] = [];
 
   const testCmd = vscode.commands.registerCommand(
     'claudeOrchestrator.testAgent',
-    async () => {
-      // Guard: un solo test a la vez por ahora.
-      if (activeAbort) {
-        vscode.window.showWarningMessage(
-          'Ya hay un test agent corriendo. Cancelálo antes de lanzar otro.',
-        );
-        return;
-      }
-
+    () => {
       // cwd: si hay workspace abierto, lo usamos; si no, cwd del proceso.
       // El agente necesita un cwd válido para que Read/Bash/Grep tengan
       // contexto. En EDH suele haber workspace folder al ejecutar comandos.
       const cwd =
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-      activeAbort = new AbortController();
       channel.show(true);
       channel.appendLine(
-        `[${ts()}] >>> start prompt=${JSON.stringify(TEST_PROMPT)} cwd=${cwd}`,
+        `[${ts()}] >>> palette test agent cwd=${cwd}`,
       );
 
-      try {
-        const result = await runner.startAgent({
-          prompt: TEST_PROMPT,
-          cwd,
-          abortSignal: activeAbort.signal,
-          onEvent: (event) => logAgentEvent(channel, event),
-        });
-        channel.appendLine(
-          `[${ts()}] <<< done status=${result.status} tools=${result.toolCallCount}` +
-            ` duration=${result.durationMs}ms cost=$${result.costUsd.toFixed(4)}`,
-        );
-      } catch (err) {
-        // Defensivo: el runner ya maneja sus errores y retorna AgentResult.
-        // Esto solo aplicaría si la importación dinámica falla catastrófica.
-        const msg = err instanceof Error ? err.message : String(err);
-        channel.appendLine(`[${ts()}] !!! runner error: ${msg}`);
-      } finally {
-        activeAbort = null;
-      }
+      const { agentId, finished } = bridge.spawn({
+        name: 'palette-test',
+        prompt: TEST_PROMPT,
+        cwd,
+      });
+      palette.push(agentId);
+
+      // Log "completado" cuando termina. `finally` (no `then`)
+      // garantiza el cleanup del `palette` aunque la promise
+      // rechace; sin esto, un error catastrófico del runner
+      // dejaría el agentId huérfano en la pila y `cancel`
+      // apuntaría a un agente que ya no existe.
+      finished.finally(() => {
+        const idx = palette.indexOf(agentId);
+        if (idx >= 0) palette.splice(idx, 1);
+        channel.appendLine(`[${ts()}] <<< palette test agent finished id=${agentId}`);
+      });
     },
   );
 
   const cancelCmd = vscode.commands.registerCommand(
     'claudeOrchestrator.cancelTestAgent',
     () => {
-      if (!activeAbort) {
+      const last = palette[palette.length - 1];
+      if (!last) {
         vscode.window.showInformationMessage(
           'No hay test agent activo para cancelar.',
         );
         return;
       }
-      channel.appendLine(`[${ts()}] !!! cancel requested by user`);
-      activeAbort.abort();
+      channel.appendLine(`[${ts()}] !!! cancel requested by user id=${last}`);
+      bridge.cancel(last);
     },
   );
 

@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import * as vscode from 'vscode';
-import type { AgentRunner } from '../runtime/agent-runner';
+import type { DashboardBridge } from '../dashboard/bridge';
 import { ts } from '../runtime/log';
 import { OrchestratorMcpServer } from './server';
 
@@ -23,7 +23,7 @@ const ALLOWED_HOSTS = [
 
 export interface OrchestratorHttpServerOptions {
   channel: vscode.OutputChannel;
-  runner: AgentRunner;
+  bridge: DashboardBridge;
   serverInfo: { name: string; version: string };
   // Token bearer requerido en el header `Authorization` de cada request.
   // Sin él, cualquier proceso local podría invocar el tool y gastar crédito
@@ -50,7 +50,7 @@ export class OrchestratorHttpServer {
     this.expectedAuthHeader = Buffer.from(`Bearer ${options.bearerToken}`, 'utf-8');
     this.mcp = new OrchestratorMcpServer({
       channel: options.channel,
-      runner: options.runner,
+      bridge: options.bridge,
       serverInfo: options.serverInfo,
       allowedHosts: ALLOWED_HOSTS,
     });

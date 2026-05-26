@@ -47,6 +47,17 @@
           "name": "Dashboard"
         }
       ]
+    },
+    "configuration": {
+      "title": "Claude Orchestrator",
+      "properties": {
+        "claudeOrchestrator.projectsRoot": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Absolute paths. Each direct subfolder of a path here is treated as a project. Used to derive project/task labels in the dashboard from the agent cwd. Tildes (~) are expanded to the user home."
+        }
+      }
     }
   },
   "scripts": {

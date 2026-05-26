@@ -45,6 +45,10 @@ const MS_PER_DAY = 86_400_000;
  * agrega si lo necesita ("4m ago" en UP NEXT, "9m ago" en RECENT
  * extendido, etc.) — así el helper sirve para ambos contextos.
  *
+ * El segundo arg es opcional: default = `Date.now()`. Aceptarlo
+ * permite tests deterministas y dejar al call site congelar el
+ * "now" si quiere muchos cálculos coherentes en el mismo frame.
+ *
  * Ejemplos (now = '2026-05-25T14:34:30Z'):
  *   formatRelative('2026-05-25T14:30:00Z', now) → "4m"
  *   formatRelative('2026-05-25T14:34:00Z', now) → "30s"
@@ -53,10 +57,10 @@ const MS_PER_DAY = 86_400_000;
  *
  * `iso` o `nowIso` inválidos → "—".
  */
-export function formatRelative(iso: string | undefined, nowIso: string): string {
+export function formatRelative(iso: string | undefined, nowIso?: string): string {
   if (!iso) return '—';
   const past = new Date(iso).getTime();
-  const now = new Date(nowIso).getTime();
+  const now = nowIso ? new Date(nowIso).getTime() : Date.now();
   if (!Number.isFinite(past) || !Number.isFinite(now)) return '—';
   const diff = Math.max(0, now - past);
 

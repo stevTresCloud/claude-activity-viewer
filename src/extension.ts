@@ -4,6 +4,7 @@ import { registerTestAgentCommands } from './commands/test-agent';
 import { AgentRunner } from './runtime/agent-runner';
 import { OrchestratorHttpServer } from './mcp/http-transport';
 import { DashboardViewProvider } from './views/dashboard';
+import { DashboardBridge } from './dashboard/bridge';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -22,7 +23,8 @@ const MCP_TOKEN_SECRET_KEY = 'mcp.bearerToken';
  * `activate` se dispara cuando VS Code resuelve cualquier
  * `activationEvent` declarado en el package.json (o cuando el usuario
  * invoca un comando contribuido). Registra los comandos, crea el
- * OutputChannel compartido y arranca el MCP server HTTP local.
+ * OutputChannel compartido, instancia el bridge del dashboard y
+ * arranca el MCP server HTTP local.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   // OutputChannel compartido para todo el extension host. Vive en
@@ -46,8 +48,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // carga del módulo cada vez que arranca un agente.
   const runner = new AgentRunner();
 
+  // === Bridge: registry + supervisor + persistencia ===
+  // Punto de entrada único para "lanzar y observar agentes". Tanto
+  // palette commands como MCP handler pasan por bridge.spawn — nunca
+  // llaman runner.startAgent directo. Esto centraliza eventos al
+  // webview, persistencia en globalState y derivación de project/task.
+  const bridge = new DashboardBridge({ context, channel, runner });
+  await bridge.hydrate();
+
   // Comandos del runner: lanzar y cancelar un agente de prueba.
-  registerTestAgentCommands(context, channel, runner);
+  registerTestAgentCommands(context, channel, bridge);
 
   // === Bearer token del MCP server ===
   // Lo persistimos en context.secrets para reusar el mismo token entre
@@ -87,7 +97,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Por eso el await/catch va aislado y NO bloquea activate().
   const httpServer = new OrchestratorHttpServer({
     channel,
-    runner,
+    bridge,
     bearerToken,
     serverInfo: { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
   });
@@ -108,6 +118,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           `[mcp] !!! dispose error: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
+      // Bridge cancela agentes vivos + flush final de persistencia.
+      bridge.dispose().catch((err) => {
+        channel.appendLine(
+          `[bridge] !!! dispose error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     },
   });
 
@@ -117,7 +133,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // mantiene vivo el estado de Vue/Pinia mientras el sidebar está
   // colapsado — el costo (~5MB RAM) es preferible a re-hidratar todo
   // cada vez que se reabre.
-  const dashboardProvider = new DashboardViewProvider(context.extensionUri);
+  const dashboardProvider = new DashboardViewProvider(context.extensionUri, bridge);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewType,
@@ -129,7 +145,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 /**
  * Hook de desactivación. No-op intencional: todos los recursos vivos
- * (channel, commands, listeners) están en `context.subscriptions` y los
- * dispose VS Code automáticamente al desactivar la extensión.
+ * (channel, commands, listeners, bridge) están en `context.subscriptions`
+ * y los dispose VS Code automáticamente al desactivar la extensión.
  */
 export function deactivate(): void {}

@@ -20,7 +20,6 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatRelative } from '../../utils/format';
-import { MOCK_NOW_ISO } from '../../stores/useAgentsStore';
 import PriorityPill from '../atoms/PriorityPill.vue';
 
 const props = defineProps<{
@@ -29,9 +28,7 @@ const props = defineProps<{
   index: number;
 }>();
 
-const queuedAgo = computed(() =>
-  formatRelative(props.agent.queuedSinceIso, MOCK_NOW_ISO),
-);
+const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
 </script>
 
 <template>

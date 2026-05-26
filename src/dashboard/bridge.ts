@@ -1,0 +1,792 @@
+/* ================================================================
+ * bridge.ts — Supervisor del dashboard + puente extension ↔ webview.
+ *
+ * Responsabilidades en una sola clase:
+ *   1. Registry de agentes vivos + completados en memoria.
+ *   2. Lanzar un agente vía AgentRunner y reemitir sus eventos al
+ *      webview en tiempo real (postMessage).
+ *   3. Persistir snapshot + logs en `context.globalState` con TTL
+ *      30 días, cleanup al activate, marcado "ide_restart" para
+ *      huérfanos.
+ *   4. Derivar project/task/branch del cwd según §9.2 del brief.
+ *   5. Ringbuffer de log per-agent (1000 entries FIFO) para que un
+ *      futuro detail panel tenga histórico sin reventar memoria.
+ *
+ * Por qué una sola clase y no tres:
+ *   El registry, el supervisor de runs y el persister están
+ *   acoplados: un evento del runner muta el registry, dispara
+ *   postMessage Y agenda persistencia. Separarlos en clases
+ *   distintas multiplica indirecciones para cero ganancia
+ *   conceptual mientras el dominio sea "agentes en memoria + log
+ *   bounded + 1 webview". Si en v0.2 entra multi-window /
+ *   multi-runner, se reabre.
+ *
+ * Single source of truth para el state del dashboard. Cualquier
+ * actor (MCP handler, palette command) que quiera lanzar un
+ * agente PASA por bridge.spawn — nunca llama runner.startAgent
+ * directo.
+ * ================================================================ */
+
+import * as childProcess from 'node:child_process';
+import * as crypto from 'node:crypto';
+import * as path from 'node:path';
+import * as vscode from 'vscode';
+import type { AgentRunner } from '../runtime/agent-runner';
+import type { AgentEvent, AgentStatus as RuntimeAgentStatus } from '../runtime/types';
+import { logAgentEvent, ts } from '../runtime/log';
+import type {
+  AgentCompletedResult,
+  AgentSnapshot,
+  AgentStatus,
+  DashboardEventToWebview,
+  LogEntry,
+} from '../shared/dashboard-protocol';
+
+// === Constantes ===
+
+const STATE_KEY = 'claudeOrchestrator.agents';
+const LOG_RING_MAX = 1000;
+const TTL_MS = 30 * 24 * 60 * 60 * 1000;       // 30 días
+const PERSIST_DEBOUNCE_MS = 500;
+/**
+ * Ventana de contexto efectiva en tokens. Claude 4 hoy reporta
+ * 200k de contexto público. Usado para derivar contextUsedPct =
+ * (input_tokens / CONTEXT_WINDOW_TOKENS) * 100.
+ *
+ * Cuando el SDK reporte un campo `context_window` propio, se
+ * deprecará. Mientras tanto, 200k es el número con el que el SDK
+ * mismo trabaja (`maxTurns` no acota el contexto, solo las idas y
+ * vueltas).
+ */
+const CONTEXT_WINDOW_TOKENS = 200_000;
+
+// === Tipos internos ===
+
+/**
+ * Forma del snapshot que persistimos en `context.globalState`.
+ * Reusa `AgentSnapshot` (el del wire) más el log bounded — así un
+ * reload del webview puede reconstruir state + (eventualmente)
+ * detail panel.
+ *
+ * `cwd` y `prompt` viven acá pero NO en el wire — la UI hoy no
+ * los necesita, pero sí los pedirán features futuras como el
+ * panel de detalle (mostrar con qué se lanzó el agente) y el
+ * scanner de sesiones (resume desde un cwd histórico).
+ */
+interface StoredAgent {
+  snapshot: AgentSnapshot;
+  cwd: string;
+  prompt: string;
+  log: LogEntry[];
+}
+
+/** Input para `bridge.spawn`. Conecta MCP handler / palette command. */
+export interface SpawnInput {
+  /** Display name del agente. Opcional: fallback agent-<shortid>. */
+  name?: string;
+  prompt: string;
+  cwd: string;
+  /** Override de la resolución del project (opciones.project del MCP). */
+  projectOverride?: string;
+  /** Lo agrupa visualmente con otros agentes del mismo batch_id. */
+  batchId?: string;
+}
+
+/** Output sincrónico de spawn. La promise `finished` resuelve cuando termina. */
+export interface SpawnOutput {
+  agentId: string;
+  finished: Promise<void>;
+}
+
+// === Bridge ===
+
+export interface DashboardBridgeOptions {
+  context: vscode.ExtensionContext;
+  channel: vscode.OutputChannel;
+  runner: AgentRunner;
+}
+
+/**
+ * Punto de entrada único para "lanzar y observar agentes" desde
+ * cualquier rincón de la extensión. Ver docstring de archivo.
+ */
+export class DashboardBridge {
+  private readonly context: vscode.ExtensionContext;
+  private readonly channel: vscode.OutputChannel;
+  private readonly runner: AgentRunner;
+
+  // Registry en memoria. Mantener Map para lookup O(1) por id —
+  // el orden de inserción es estable y nos sirve para serializar
+  // a array de forma reproducible.
+  private readonly agents = new Map<string, StoredAgent>();
+  private readonly aborts = new Map<string, AbortController>();
+  // Promises de runs en vuelo. Las trackeamos para que dispose()
+  // pueda esperarlas con allSettled antes del flush final — si no
+  // las espera, el flush captura el state PRE-terminal de los
+  // agentes en cancelAll() y al próximo activate quedan marcados
+  // como huérfanos (failed/ide_restart) en vez de cancelled.
+  private readonly activeRuns = new Set<Promise<void>>();
+
+  // Webview vivo, si hay uno attached. Null mientras el sidebar
+  // está cerrado / no resuelto. Cuando se reattachea, hidratamos
+  // con agent_list completo.
+  private webview: vscode.Webview | null = null;
+
+  // Persistencia debounced: cada evento agenda un flush, sucesivos
+  // mientras el timer corre se colapsan en uno solo. Sin esto, un
+  // agente verboso (cientos de tool_use/sec) generaría N writes
+  // por segundo al globalState — fallaría rendimiento de VS Code.
+  private persistTimer: NodeJS.Timeout | null = null;
+
+  constructor(options: DashboardBridgeOptions) {
+    this.context = options.context;
+    this.channel = options.channel;
+    this.runner = options.runner;
+  }
+
+  // ====================================================================
+  // === Lifecycle ======================================================
+  // ====================================================================
+
+  /**
+   * Hydrate al activate de la extensión. Lee globalState, marca
+   * agentes huérfanos (status='running' que sobrevivieron a
+   * restart) como failed con reason='ide_restart', y aplica
+   * cleanup TTL de items completed >30 días.
+   *
+   * NO emite eventos al webview — todavía no hay uno attached.
+   * Cuando el webview attache, recibe el agent_list completo.
+   */
+  async hydrate(): Promise<void> {
+    const stored = this.context.globalState.get<StoredAgent[]>(STATE_KEY, []);
+    const now = Date.now();
+    let orphaned = 0;
+    let evicted = 0;
+
+    for (const entry of stored) {
+      // === Cleanup TTL ===
+      // Items completados hace >30 días se descartan.
+      if (entry.snapshot.completedAtIso) {
+        const completedMs = Date.parse(entry.snapshot.completedAtIso);
+        if (now - completedMs > TTL_MS) {
+          evicted++;
+          continue;
+        }
+      }
+
+      // === Recovery de huérfanos ===
+      // Un agente que sigue en 'running' al hydrate es huérfano:
+      // su subprocess murió con la EDH previa. Lo marcamos failed
+      // para que el user lo vea en RECENT con razón clara.
+      if (entry.snapshot.status === 'running') {
+        entry.snapshot.status = 'failed';
+        entry.snapshot.reason = 'ide_restart';
+        entry.snapshot.completedAtIso = new Date(now).toISOString();
+        orphaned++;
+      }
+
+      this.agents.set(entry.snapshot.id, entry);
+    }
+
+    if (orphaned > 0 || evicted > 0) {
+      this.channel.appendLine(
+        `[${ts()}] [bridge] hydrate orphaned=${orphaned} evicted=${evicted} total=${this.agents.size}`,
+      );
+      // Persistimos sync porque el set de cambios es de una sola
+      // pasada y no queremos que la primera escritura del bridge
+      // post-hydrate se demore por el debounce.
+      await this.context.globalState.update(STATE_KEY, this.serialize());
+    }
+  }
+
+  /**
+   * Attach del webview vivo. Llamado por DashboardViewProvider en
+   * `resolveWebviewView`. Manda agent_list para hidratar el store
+   * del lado Vue con el snapshot actual.
+   *
+   * Retorna el webview attachado — el caller debe pasarlo a
+   * `detachWebview(token)` al cerrar el view para evitar
+   * desconectar un attach posterior (VS Code puede invocar
+   * resolveWebviewView dos veces sin onDidDispose intermedio
+   * cuando el view migra entre sidebars).
+   */
+  attachWebview(webview: vscode.Webview): vscode.Webview {
+    this.webview = webview;
+    const agents = this.snapshotList();
+    this.channel.appendLine(
+      `[${ts()}] [bridge] webview attached, hydrating ${agents.length} agents`,
+    );
+    this.post({ type: 'agent_list', agents });
+    return webview;
+  }
+
+  /**
+   * Disposable: VS Code cierra el webview, soltamos la referencia
+   * SOLO si seguimos apuntando al mismo. Si un attach posterior
+   * ya pisó la referencia (porque el view migró), no toquemos: el
+   * webview vigente es el nuevo.
+   */
+  detachWebview(token: vscode.Webview): void {
+    if (this.webview === token) {
+      this.webview = null;
+    }
+  }
+
+  // ====================================================================
+  // === Spawn / cancel =================================================
+  // ====================================================================
+
+  /**
+   * Punto de entrada único para lanzar un agente. Llamado por:
+   *   - El handler MCP `spawn_agents` (uno por task del array).
+   *   - El comando palette `claudeOrchestrator.testAgent`.
+   *
+   * Retorna sync con el `agentId` ya en el registry + UI. La
+   * promise `finished` resuelve cuando el agente termina (útil
+   * para MCP que quiere log de cierre, no para bloquear la
+   * respuesta).
+   */
+  spawn(input: SpawnInput): SpawnOutput {
+    const agentId = this.makeAgentId();
+    const name = input.name ?? `agent-${agentId.slice(0, 8)}`;
+    const batchId = input.batchId ?? `b-${agentId.slice(0, 8)}`;
+    const context = deriveProjectContext(
+      input.cwd,
+      this.getProjectsRoot(),
+      input.projectOverride,
+    );
+
+    const startedAtIso = new Date().toISOString();
+    const snapshot: AgentSnapshot = {
+      id: agentId,
+      name,
+      status: 'running',
+      project: context.project,
+      task: context.task,
+      branch: context.branch,
+      batchId,
+      startedAtIso,
+      elapsedMs: 0,
+      tokensUsed: 0,
+      contextUsedPct: 0,
+    };
+
+    const stored: StoredAgent = {
+      snapshot,
+      cwd: input.cwd,
+      prompt: input.prompt,
+      log: [],
+    };
+    this.agents.set(agentId, stored);
+
+    const abort = new AbortController();
+    this.aborts.set(agentId, abort);
+
+    this.channel.appendLine(
+      `[${ts()}] [bridge] spawn id=${agentId} name=${name} project=${context.project} cwd=${input.cwd}`,
+    );
+    this.post({ type: 'agent_created', agent: { ...snapshot } });
+    this.schedulePersist();
+
+    // === Run en background ===
+    // No await acá: el caller puede observar via `finished` si le
+    // interesa, pero la respuesta del MCP retorna inmediato.
+    const finished = this.run(agentId, input, abort.signal).catch((err) => {
+      // Defensivo: el runner ya captura sus errores; solo entraría
+      // acá si el dynamic import del SDK falla catastrófico.
+      this.channel.appendLine(
+        `[${ts()}] [bridge] !!! run uncaught id=${agentId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    // Trackear para dispose(); cleanup cuando termine.
+    this.activeRuns.add(finished);
+    finished.finally(() => this.activeRuns.delete(finished));
+
+    return { agentId, finished };
+  }
+
+  /**
+   * Cancela un agente activo. Si no existe o ya terminó, no-op.
+   * Lo consumirá el cancel UI button cuando se cablee, y se usa
+   * también desde dispose() al apagar la EDH.
+   */
+  cancel(agentId: string): boolean {
+    const abort = this.aborts.get(agentId);
+    if (!abort) return false;
+    this.channel.appendLine(`[${ts()}] [bridge] cancel id=${agentId}`);
+    abort.abort();
+    return true;
+  }
+
+  /** Cancela todos los agentes activos. Llamado en dispose. */
+  cancelAll(): void {
+    for (const id of this.aborts.keys()) {
+      this.cancel(id);
+    }
+  }
+
+  // ====================================================================
+  // === Runner integration =============================================
+  // ====================================================================
+
+  /**
+   * Ejecuta el agente y traduce AgentEvent (runtime) →
+   * DashboardEventToWebview (wire). Acumula tokens, contextUsedPct,
+   * currentTool a lo largo del stream y los emite via
+   * agent_status_changed con metadata parcial.
+   */
+  private async run(
+    agentId: string,
+    input: SpawnInput,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Accumuladores de stream. Cada vez que cambian, emitimos
+    // status_changed con el subset cambiado (no toda la snapshot).
+    let lastTool: string | undefined;
+    let lastSubtitle: string | undefined;
+    let lastTokensUsed = 0;
+    let lastContextPct = 0;
+
+    try {
+      const result = await this.runner.startAgent({
+        prompt: input.prompt,
+        cwd: input.cwd,
+        abortSignal: signal,
+        onEvent: (event) => {
+          // Log al OutputChannel para diagnóstico (igual que MCP/palette ya hacían).
+          logAgentEvent(this.channel, event);
+
+          // === Traducción a LogEntry + posibles metadata updates ===
+          const entry = translateToLogEntry(event);
+          if (entry) {
+            this.appendLog(agentId, entry);
+          }
+
+          // status crudo del runtime → wire status + agent_status_changed
+          // sin metadata. El terminal status (completed/failed/cancelled)
+          // se reemite en run() después del await con duración + tokens.
+          if (event.type === 'status') {
+            // Solo reemitimos 'running' acá; los terminales los maneja
+            // el wrapper de abajo cuando tengamos durationMs definitivo.
+            if (event.status === 'running') {
+              this.emitStatusChange(agentId, 'running');
+            }
+            return;
+          }
+
+          if (event.type === 'tool_use') {
+            lastTool = event.name;
+            lastSubtitle = subtitleFromToolInput(event.name, event.input);
+            this.emitStatusChange(agentId, 'running', {
+              currentTool: lastTool,
+              subtitle: lastSubtitle,
+            });
+            return;
+          }
+
+          if (event.type === 'usage') {
+            lastTokensUsed = event.inputTokens + event.outputTokens;
+            lastContextPct = Math.min(
+              100,
+              Math.round((event.inputTokens / CONTEXT_WINDOW_TOKENS) * 100),
+            );
+            this.emitStatusChange(agentId, 'running', {
+              tokensUsed: lastTokensUsed,
+              contextUsedPct: lastContextPct,
+            });
+            return;
+          }
+        },
+      });
+
+      // === Terminal ===
+      // Calculamos elapsed/duration en wall-clock acá (no en el
+      // runner) para que el snapshot que persistimos lleve el
+      // valor definitivo coherente con el completedAtIso.
+      const completedAtIso = new Date().toISOString();
+      const wireStatus = runtimeToWireStatus(result.status);
+      const stored = this.agents.get(agentId);
+      if (stored) {
+        stored.snapshot.status = wireStatus;
+        stored.snapshot.completedAtIso = completedAtIso;
+        stored.snapshot.durationMs = result.durationMs;
+        stored.snapshot.tokensUsed = lastTokensUsed || result.inputTokens + result.outputTokens;
+        stored.snapshot.contextUsedPct = lastContextPct;
+        stored.snapshot.currentTool = lastTool;
+        stored.snapshot.subtitle = lastSubtitle;
+        if (wireStatus !== 'done' && result.finalResponse) {
+          stored.snapshot.reason = result.finalResponse;
+        }
+      }
+
+      const completedResult: AgentCompletedResult = {
+        status: wireStatus as AgentCompletedResult['status'],
+        durationMs: result.durationMs,
+        tokensUsed: lastTokensUsed || result.inputTokens + result.outputTokens,
+        reason: stored?.snapshot.reason,
+      };
+      this.post({ type: 'agent_completed', agentId, result: completedResult });
+    } finally {
+      this.aborts.delete(agentId);
+      this.schedulePersist();
+    }
+  }
+
+  // ====================================================================
+  // === Emisión de eventos =============================================
+  // ====================================================================
+
+  private emitStatusChange(
+    agentId: string,
+    status: AgentStatus,
+    metadata?: Partial<AgentSnapshot>,
+  ): void {
+    // Reflejamos el cambio en el registry local antes de emitir
+    // para que un attach posterior vea ya el state actualizado.
+    const stored = this.agents.get(agentId);
+    if (stored) {
+      stored.snapshot.status = status;
+      if (metadata) {
+        Object.assign(stored.snapshot, metadata);
+      }
+    }
+    this.post({ type: 'agent_status_changed', agentId, status, metadata });
+    this.schedulePersist();
+  }
+
+  /**
+   * Append a log + emitir agent_log al webview. El ringbuffer se
+   * mantiene en `stored.log` (per-agent, FIFO bounded).
+   */
+  private appendLog(agentId: string, entry: LogEntry): void {
+    const stored = this.agents.get(agentId);
+    if (stored) {
+      stored.log.push(entry);
+      if (stored.log.length > LOG_RING_MAX) {
+        // shift es O(n) pero con N=1000 el costo es trivial (~µs).
+        // Si esto se vuelve hot path se cambia a un ring real con
+        // head/tail indices.
+        stored.log.shift();
+      }
+    }
+    this.post({ type: 'agent_log', agentId, entry });
+    // Log entries cambian rápido — solo persistimos cada N
+    // entries o cuando cambia status. Para evitar contar acá,
+    // dejamos el debounce de schedulePersist (500ms) que ya colapsa.
+    this.schedulePersist();
+  }
+
+  /** Post al webview si está attached. Si no, evento perdido (no hay queue). */
+  private post(event: DashboardEventToWebview): void {
+    if (!this.webview) return;
+    // postMessage es fire-and-forget; si el webview murió en medio
+    // del frame, VS Code lo absorbe sin tirar.
+    this.webview.postMessage(event);
+  }
+
+  // ====================================================================
+  // === Persistencia ====================================================
+  // ====================================================================
+
+  /** Agenda flush con debounce. Múltiples calls dentro de la ventana colapsan. */
+  private schedulePersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.flush();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  private async flush(): Promise<void> {
+    // Capturamos el snapshot SYNC antes del await. Sin esto, dos
+    // flushes solapados podrían terminar fuera de orden y dejar
+    // un snapshot más viejo encima del más nuevo. Tomar el array
+    // de inmediato fija el state del momento exacto del flush
+    // que pidió disparar este write.
+    const snapshot = this.serialize();
+    try {
+      await this.context.globalState.update(STATE_KEY, snapshot);
+    } catch (err) {
+      this.channel.appendLine(
+        `[${ts()}] [bridge] !!! persist error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private serialize(): StoredAgent[] {
+    return Array.from(this.agents.values());
+  }
+
+  // ====================================================================
+  // === Disposal =======================================================
+  // ====================================================================
+
+  async dispose(): Promise<void> {
+    // Cancelamos cualquier agente activo: la EDH se está apagando.
+    // Sus subprocess se llevarán "cancelled" como status.
+    this.cancelAll();
+
+    // Esperamos a que cada run() resuelva su bloque terminal
+    // (status='cancelled' + completedAtIso) antes del flush final.
+    // Sin este await el flush captura el state PRE-cancelado y al
+    // próximo activate quedan como huérfanos (running→failed
+    // con razón ide_restart) en vez de cancelled limpio.
+    if (this.activeRuns.size > 0) {
+      await Promise.allSettled([...this.activeRuns]);
+    }
+
+    // Si hay un flush pendiente lo ejecutamos ahora — perder la
+    // última hornada de cambios deja datos inconsistentes en el
+    // próximo activate.
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    await this.flush();
+  }
+
+  // ====================================================================
+  // === Helpers internos ===============================================
+  // ====================================================================
+
+  private snapshotList(): AgentSnapshot[] {
+    // Spread copy: el webview no debe ver mutaciones del registry
+    // interno. Shallow es suficiente porque AgentSnapshot es plano
+    // (todos los campos son primitivos / strings / numbers).
+    return Array.from(this.agents.values()).map((s) => ({ ...s.snapshot }));
+  }
+
+  private makeAgentId(): string {
+    return crypto.randomUUID();
+  }
+
+  private getProjectsRoot(): string[] {
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const raw = cfg.get<string[]>('projectsRoot', []);
+    // Expandir ~ y normalizar; usuarios pueden poner "~/git19/docs".
+    return raw.map((p) => expandUserHome(p));
+  }
+}
+
+// ====================================================================
+// === Helpers de módulo (exportables para tests futuros) =============
+// ====================================================================
+
+/**
+ * Mapea el AgentStatus del runtime al del wire UI.
+ * Runtime usa 'completed'; el wire/UI usa 'done' por consistencia
+ * con el wireframe del brief (RECENT muestra "✓ done").
+ */
+export function runtimeToWireStatus(s: RuntimeAgentStatus): AgentStatus {
+  switch (s) {
+    case 'running':
+      return 'running';
+    case 'completed':
+      return 'done';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    default: {
+      // Forward-compat: status nuevo del runtime → fallback failed.
+      const _exhaustive: never = s;
+      void _exhaustive;
+      return 'failed';
+    }
+  }
+}
+
+/**
+ * Deriva (project, task, branch) del cwd siguiendo §9.2 del brief.
+ *
+ *   1. options.project explícito gana.
+ *   2. cwd matchea `<root>/<project>/...` para algún root → ese segmento.
+ *   3. cwd matchea workspace folder → basename del folder.
+ *   4. fallback basename(cwd).
+ *
+ * `task` solo cubre la convención `<root>/<project>/tasks/<task>/...`
+ * (el caso 1 del brief §9.3). La heurística alternativa de "primer
+ * subfolder sin nivel `tasks/`" se descarta deliberadamente: infiere
+ * tasks falsos en estructuras planas de repos no-Trescloud. Sin
+ * match, `task = ''` y la UI muestra el fallback (línea solo con
+ * branch).
+ *
+ * `branch` vía `git -C <cwd> branch --show-current` sync. Si el cwd
+ * no es git repo, cadena vacía. Sync porque el costo es ~10-30ms y
+ * facilita razonamiento: el snapshot inicial ya viene completo.
+ *
+ * Exportable y puro a propósito — testeable con casos sintéticos
+ * sin necesidad de filesystem.
+ */
+export function deriveProjectContext(
+  cwd: string,
+  projectsRoot: string[],
+  override?: string,
+  workspaceFolders?: readonly string[],
+): { project: string; task: string; branch: string } {
+  const normCwd = normalizePath(cwd);
+  let project = '';
+  let task = '';
+
+  if (override) {
+    project = override;
+  } else {
+    // Match contra projectsRoot (tiene prioridad sobre workspaceFolders
+    // porque es el setting explícito que el user controla).
+    for (const root of projectsRoot) {
+      const normRoot = normalizePath(root);
+      if (isSubPath(normCwd, normRoot)) {
+        const rel = normCwd.slice(normRoot.length + 1);
+        const segments = rel.split('/');
+        if (segments[0]) {
+          project = segments[0];
+          // Si existe `<project>/tasks/<task>/...` extraer task.
+          if (segments[1] === 'tasks' && segments[2]) {
+            task = segments[2];
+          }
+        }
+        break;
+      }
+    }
+
+    // Workspace folders (lectura desde vscode si no se pasa override).
+    if (!project) {
+      const folders = workspaceFolders ?? readWorkspaceFolders();
+      for (const folder of folders) {
+        const normFolder = normalizePath(folder);
+        if (normCwd === normFolder || isSubPath(normCwd, normFolder)) {
+          project = path.basename(normFolder);
+          break;
+        }
+      }
+    }
+
+    if (!project) {
+      project = path.basename(normCwd) || normCwd;
+    }
+  }
+
+  const branch = readGitBranch(cwd);
+  return { project, task, branch };
+}
+
+/**
+ * Traduce un AgentEvent del runtime a un LogEntry del wire.
+ * Devuelve null para eventos que no queremos persistir (los
+ * 'status' los manejamos aparte como agent_status_changed).
+ */
+function translateToLogEntry(event: AgentEvent): LogEntry | null {
+  const tsMs = Date.now();
+  switch (event.type) {
+    case 'thinking':
+      return { ts: tsMs, kind: 'thinking', text: event.text };
+    case 'text':
+      return { ts: tsMs, kind: 'text', text: event.text };
+    case 'tool_use':
+      return { ts: tsMs, kind: 'tool_use', name: event.name, input: event.input };
+    case 'tool_result':
+      return {
+        ts: tsMs,
+        kind: 'tool_result',
+        toolUseId: event.toolUseId,
+        result: event.result,
+        isError: event.isError,
+      };
+    case 'usage':
+      return {
+        ts: tsMs,
+        kind: 'usage',
+        tokensUsed: event.inputTokens + event.outputTokens,
+      };
+    case 'status':
+      // Los status changes los emitimos como agent_status_changed
+      // (canal específico para que la UI no tenga que filtrar).
+      return null;
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return null;
+    }
+  }
+}
+
+/**
+ * Heurística simple para sacar un subtítulo human-friendly del
+ * input de un tool. Edit/Write/Read típicamente traen file_path;
+ * Bash trae command; Glob/Grep traen pattern. Sin acceso al
+ * schema oficial de cada tool, miramos las keys frecuentes en
+ * orden y truncamos.
+ */
+function subtitleFromToolInput(toolName: string, input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const obj = input as Record<string, unknown>;
+  // Orden de preferencia: campos más informativos primero.
+  // Cubre Read/Edit/Write (`file_path`), Glob/Grep (`pattern`),
+  // WebSearch (`query`), Bash (`command`), NotebookEdit
+  // (`notebook_path`), WebFetch (`url`), genéricos (`description`).
+  const keys = [
+    'file_path',
+    'notebook_path',
+    'path',
+    'pattern',
+    'query',
+    'command',
+    'url',
+    'description',
+  ];
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'string' && v.length > 0) {
+      return truncateMiddle(v, 60);
+    }
+  }
+  return toolName;
+}
+
+function truncateMiddle(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const half = Math.floor((max - 1) / 2);
+  return s.slice(0, half) + '…' + s.slice(s.length - half);
+}
+
+function normalizePath(p: string): string {
+  // path.resolve normaliza separadores + resuelve .. — suficiente
+  // para nuestros matches. NO resolvemos symlinks (realpath) porque
+  // el user que setea projectsRoot generalmente apunta al path
+  // canónico que él tipea.
+  return path.resolve(expandUserHome(p));
+}
+
+function isSubPath(child: string, parent: string): boolean {
+  return child.startsWith(parent + '/') || child === parent;
+}
+
+function expandUserHome(p: string): string {
+  if (p.startsWith('~/') || p === '~') {
+    const home = process.env.HOME ?? '';
+    return p === '~' ? home : path.join(home, p.slice(2));
+  }
+  return p;
+}
+
+function readWorkspaceFolders(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((w) => w.uri.fsPath);
+}
+
+function readGitBranch(cwd: string): string {
+  try {
+    const out = childProcess.execFileSync(
+      'git',
+      ['-C', cwd, 'branch', '--show-current'],
+      {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+      },
+    );
+    return out.trim();
+  } catch {
+    // No es git repo / git no instalado / cwd inexistente — fallback vacío.
+    return '';
+  }
+}

@@ -1,16 +1,16 @@
+import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import * as vscode from 'vscode';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { AgentRunner } from '../runtime/agent-runner';
-import type { AgentResult } from '../runtime/types';
-import { LOG_TRUNCATE_AT, logAgentEvent, ts, truncate } from '../runtime/log';
+import type { DashboardBridge } from '../dashboard/bridge';
+import { ts } from '../runtime/log';
 import { SPAWN_AGENTS_INPUT_SHAPE, type SpawnAgentsArgs } from './types';
 
 export interface OrchestratorMcpServerOptions {
   channel: vscode.OutputChannel;
   serverInfo: { name: string; version: string };
-  runner: AgentRunner;
+  bridge: DashboardBridge;
   // Allowed Host header values para la protección DNS rebinding del transport.
   // Lo pasa el http-transport que conoce su propio bind (host:port).
   allowedHosts: string[];
@@ -25,20 +25,25 @@ export interface OrchestratorMcpServerOptions {
  *   request OK, el `_streamMapping` del transport conserva entries
  *   muertos y el siguiente request explota con 500. Crear instancias
  *   nuevas por call esquiva el bug a costo de microsegundos de overhead
- *   en localhost. El tradeoff es aceptable mientras procesemos UNA tarea
- *   por call; si compartimos transport entre múltiples tasks habrá que
- *   re-evaluar.
+ *   en localhost.
+ *
+ * Contrato actual del tool `spawn_agents`:
+ *   - Acepta N tasks (max 8 hoy) con cwd obligatorio.
+ *   - Lanza cada una vía bridge.spawn (que crea el snapshot, dispara
+ *     el AgentRunner en background y emite eventos al webview).
+ *   - Retorna INMEDIATAMENTE con `{ batchId, agentIds }`. NO espera a
+ *     que los agentes terminen — la observación es vía el dashboard.
  */
 export class OrchestratorMcpServer {
   private readonly channel: vscode.OutputChannel;
   private readonly serverInfo: { name: string; version: string };
-  private readonly runner: AgentRunner;
+  private readonly bridge: DashboardBridge;
   private readonly allowedHosts: string[];
 
   constructor(options: OrchestratorMcpServerOptions) {
     this.channel = options.channel;
     this.serverInfo = options.serverInfo;
-    this.runner = options.runner;
+    this.bridge = options.bridge;
     this.allowedHosts = options.allowedHosts;
   }
 
@@ -52,7 +57,7 @@ export class OrchestratorMcpServer {
     res: http.ServerResponse,
   ): Promise<void> {
     const server = new McpServer(this.serverInfo);
-    this.registerSpawnAgents(server, req);
+    this.registerSpawnAgents(server);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -90,88 +95,89 @@ export class OrchestratorMcpServer {
 
   // === Tool: spawn_agents ===
   //
-  // Contrato actual: input = { tasks: [{prompt, cwd?}] } con max(1).
-  // Sincronía simple: arrancamos UN agente, esperamos a que termine,
-  // retornamos su AgentResult serializado como CallToolResult.
+  // Defiere a bridge.spawn (sync return). El bridge agrega el agente al
+  // registry, postMessage al webview con agent_created, y arranca la
+  // ejecución en background. Retornamos los agentIds para que el caller
+  // pueda correlacionar después (ej. esperar al cierre via list_agents
+  // cuando esa tool se agregue).
   //
-  // Por qué retornamos JSON en el `text` del content en vez de
-  // `structuredContent`: el cliente Claude Code chat parsea el text
-  // como markdown y lo muestra al usuario; structuredContent requiere
-  // que el cliente lo soporte explícitamente y a mayo 2026 el comportamiento
-  // varía. JSON-stringified en text funciona en cualquier MCP client.
-  private registerSpawnAgents(
-    server: McpServer,
-    req: http.IncomingMessage,
-  ): void {
+  // batchId compartido entre las N tasks de un mismo call — el dashboard
+  // lo usa para agrupar las cards visualmente (project group container
+  // por batch).
+  private registerSpawnAgents(server: McpServer): void {
     server.registerTool(
       'spawn_agents',
       {
         title: 'Spawn Agents',
         description:
-          'Spawnea uno o más agentes Claude Code en paralelo y retorna sus resultados. ' +
-          'Cada agente corre con el toolset preset claude_code (Read/Edit/Bash/Grep/etc.) ' +
-          'y herencia de skills + memoria del usuario (~/.claude/).',
+          'Spawnea uno o más agentes Claude Code en paralelo y retorna sus IDs inmediatamente. ' +
+          'Los agentes corren en background con el toolset preset claude_code (Read/Edit/Bash/Grep/etc.) ' +
+          'y herencia de skills + memoria del usuario (~/.claude/). ' +
+          'Observación del progreso vía el dashboard del plugin (sidebar VS Code).',
         inputSchema: SPAWN_AGENTS_INPUT_SHAPE,
       },
       async (args: SpawnAgentsArgs) => {
         const stamp = ts();
+        const batchId = `b-${crypto.randomBytes(4).toString('hex')}`;
         this.channel.appendLine(
-          `[${stamp}] [mcp] spawn_agents called tasks=${args.tasks.length}`,
+          `[${stamp}] [mcp] spawn_agents tasks=${args.tasks.length} batch=${batchId}`,
         );
 
-        // cwd default: primer workspace folder de la EDH si existe; si no,
-        // cwd del proceso. El cliente externo puede sobrescribirlo por task.
-        const defaultCwd =
-          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-
-        const task = args.tasks[0];
-        const cwd = task.cwd ?? defaultCwd;
-
-        // Si el cliente HTTP cierra antes de que el agente termine,
-        // abortamos la corrida para no seguir gastando tokens en una
-        // respuesta que ya no va a llegar a ningún lado.
-        const abortController = new AbortController();
-        const onClientClose = () => abortController.abort();
-        req.once('close', onClientClose);
-
-        this.channel.appendLine(
-          `[${stamp}] [mcp] >>> spawning prompt=${truncate(JSON.stringify(task.prompt), LOG_TRUNCATE_AT)} cwd=${cwd}`,
-        );
-
+        const agentIds: string[] = [];
+        // Si bridge.spawn tira a mitad del loop (ej. fallo en
+        // globalState al persistir) los agentIds previos ya están
+        // vivos en el registry. Los cancelamos para no dejarlos
+        // huérfanos sin que el caller lo sepa, y devolvemos
+        // `isError: true` con la lista parcial — el chat externo
+        // puede correlacionar IDs con su intento original.
         try {
-          const result = await this.runner.startAgent({
-            prompt: task.prompt,
-            cwd,
-            abortSignal: abortController.signal,
-            onEvent: (event) => logAgentEvent(this.channel, event),
-          });
-
-          const endStamp = ts();
+          for (const task of args.tasks) {
+            const { agentId } = this.bridge.spawn({
+              name: task.name,
+              prompt: task.prompt,
+              cwd: task.cwd,
+              batchId,
+              projectOverride: args.options?.project,
+            });
+            agentIds.push(agentId);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
           this.channel.appendLine(
-            `[${endStamp}] [mcp] <<< spawn_agents done status=${result.status}` +
-              ` tools=${result.toolCallCount} duration=${result.durationMs}ms` +
-              ` cost=$${result.costUsd.toFixed(4)}`,
+            `[${ts()}] [mcp] !!! spawn loop failed after ${agentIds.length}/${args.tasks.length} tasks: ${msg}`,
           );
-
-          // Envolvemos el AgentResult en `results: []` para que la forma
-          // del output ya prevea la futura versión multi-agente. Los
-          // clientes pueden iterar results[] desde hoy sin migrar el día
-          // que crezca.
-          const payload = {
-            results: [result satisfies AgentResult],
-          };
-
+          for (const id of agentIds) this.bridge.cancel(id);
           return {
+            isError: true,
             content: [
               {
                 type: 'text' as const,
-                text: JSON.stringify(payload, null, 2),
+                text: JSON.stringify(
+                  {
+                    error: msg,
+                    batchId,
+                    agentIds,
+                    cancelled: true,
+                  },
+                  null,
+                  2,
+                ),
               },
             ],
           };
-        } finally {
-          req.off('close', onClientClose);
         }
+
+        // Wrap del payload en JSON text (no structuredContent) — soportado
+        // por todos los MCP clients hoy.
+        const payload = { batchId, agentIds };
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(payload, null, 2),
+            },
+          ],
+        };
       },
     );
   }

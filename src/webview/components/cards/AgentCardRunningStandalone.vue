@@ -30,6 +30,7 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
+import { useNow } from '../../composables/useNow';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -38,7 +39,19 @@ const props = defineProps<{
   agent: Agent;
 }>();
 
-const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
+// elapsed deriva de useNow() — el wire trae startedAtIso absoluto
+// y la card hace la diferencia local cada tick. Misma lógica que
+// AgentCardRunning (variante in-group); ver explicación allí.
+const now = useNow();
+const elapsedText = computed(() => {
+  if (props.agent.startedAtIso) {
+    const started = Date.parse(props.agent.startedAtIso);
+    if (Number.isFinite(started)) {
+      return formatElapsed(now.value - started);
+    }
+  }
+  return formatElapsed(props.agent.elapsedMs);
+});
 </script>
 
 <template>

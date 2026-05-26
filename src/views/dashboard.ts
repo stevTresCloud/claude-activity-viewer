@@ -9,13 +9,16 @@
  *      con webview.asWebviewUri() — el navegador del sandbox no puede
  *      cargar archivos del disco directo, necesita URIs proxy.
  *   4. Inyectamos un Content-Security-Policy estricto.
+ *   5. Conectamos el webview al `DashboardBridge` para que reciba
+ *      eventos del backend (agent_created / status_changed / etc.).
  *
- * Este provider es el cascarón. La lógica de UI (componentes,
- * postMessage, store) entra en sub-fases siguientes.
+ * Sin más lógica acá. La traducción runtime → wire la hace el bridge;
+ * el render lo hace el bundle Vue del webview.
  */
 
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
+import type { DashboardBridge } from '../dashboard/bridge';
 
 export class DashboardViewProvider implements vscode.WebviewViewProvider {
   /**
@@ -25,7 +28,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
    */
   public static readonly viewType = 'claudeOrchestrator.dashboard';
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly bridge: DashboardBridge,
+  ) {}
 
   /**
    * Hook que dispara VS Code la primera vez que el usuario abre el
@@ -90,5 +96,21 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     );
 
     webview.html = html;
+
+    // === Wiring con el bridge ===
+    // attachWebview dispara el agent_list inicial (hidratación). El
+    // listener onDidDispose desengancha cuando VS Code cierra el view
+    // (cambio de sidebar o cierre del IDE) — así el bridge no
+    // mantiene una referencia muerta.
+    //
+    // Le pasamos al detach el token (el propio webview) para que
+    // el bridge solo limpie si todavía apunta a ESTE. VS Code puede
+    // re-invocar resolveWebviewView (drag entre sidebars) y dejar
+    // el listener viejo activo; sin el token, el dispose viejo
+    // detacharía un attach posterior, dejando el bridge mudo.
+    const token = this.bridge.attachWebview(webview);
+    webviewView.onDidDispose(() => {
+      this.bridge.detachWebview(token);
+    });
   }
 }

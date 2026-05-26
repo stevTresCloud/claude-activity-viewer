@@ -4,11 +4,10 @@
  * project group (HANDOFF §2.9.1).
  *
  * Una sola línea: stripe 3px amarillo + index badge + name +
- * PriorityPill + "X ago" (vía formatRelative usando MOCK_NOW_ISO).
+ * PriorityPill + "X ago" (vía formatRelative).
  *
  * `index` viene del padre con el orden dentro del proyecto (1-based
- * porque el brief lo muestra "1", "2"... no "0"). Sin index el
- * brief lo permite pero la mock data lo trae implícito en el orden.
+ * porque el brief lo muestra "1", "2"... no "0").
  *
  * Referencia: HANDOFF.md §2.9.1.
  */
@@ -16,7 +15,6 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatRelative } from '../../utils/format';
-import { MOCK_NOW_ISO } from '../../stores/useAgentsStore';
 import PriorityPill from '../atoms/PriorityPill.vue';
 
 const props = defineProps<{
@@ -25,11 +23,9 @@ const props = defineProps<{
   index: number;
 }>();
 
-// === "X ago" derivado del queued_since vs el now del mock ===
+// === "X ago" derivado del queued_since vs el now actual ===
 
-const queuedAgo = computed(() =>
-  formatRelative(props.agent.queuedSinceIso, MOCK_NOW_ISO),
-);
+const queuedAgo = computed(() => formatRelative(props.agent.queuedSinceIso));
 </script>
 
 <template>

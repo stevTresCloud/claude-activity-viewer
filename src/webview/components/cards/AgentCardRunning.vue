@@ -28,6 +28,7 @@
 import { computed } from 'vue';
 import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
+import { useNow } from '../../composables/useNow';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -37,8 +38,22 @@ const props = defineProps<{
 }>();
 
 // === Format derivado ===
-
-const elapsedText = computed(() => formatElapsed(props.agent.elapsedMs));
+//
+// El elapsed lo derivamos en runtime contra el tick global de
+// useNow() — el wire trae startedAtIso (timestamp absoluto) pero
+// NO emite agent_status_changed cada segundo para el contador.
+// Si el agente no tiene startedAtIso (edge case del wire),
+// caemos al elapsedMs que mandó el bridge.
+const now = useNow();
+const elapsedText = computed(() => {
+  if (props.agent.startedAtIso) {
+    const started = Date.parse(props.agent.startedAtIso);
+    if (Number.isFinite(started)) {
+      return formatElapsed(now.value - started);
+    }
+  }
+  return formatElapsed(props.agent.elapsedMs);
+});
 </script>
 
 <template>
