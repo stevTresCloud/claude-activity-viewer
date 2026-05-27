@@ -164,3 +164,42 @@ export const CANCEL_AGENT_INPUT_SHAPE = {
 export type CancelAgentArgs = {
   agent_id: string;
 };
+
+// === Input schema del tool `wait_for_agents` ===
+//
+// Long-poll: bloquea hasta que todos los `agent_ids` lleguen a estado
+// terminal o vence `timeout_sec`. Si vence con pendientes, el chat
+// externo debe RE-LLAMAR la tool con los pendientes (patrón retry).
+//
+// Defaults y bounds elegidos por convergencia del ecosistema:
+//   - default 300s = `_DEFAULT_SEND_TIMEOUT` de awslabs/cli-agent-orchestrator
+//     + ejemplo recomendado del SDK Anthropic (`asyncio.wait_for(timeout=300)`).
+//   - max 1200s (20 min) para cubrir tareas medianas-grandes en una
+//     sola call sin riesgo de timeout del transport HTTP del cliente
+//     MCP. Para tareas más largas (migraciones), retry pattern.
+//   - max 8 agent_ids: mismo cap que spawn_agents (consistencia).
+//
+// Stuck detection y max runtime no van en este shape — son settings
+// globales del plugin (`claudeOrchestrator.stuckDetectionSec`,
+// `claudeOrchestrator.maxAgentRuntimeSec`).
+export const WAIT_FOR_AGENTS_INPUT_SHAPE = {
+  agent_ids: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(8)
+    .describe(
+      'Ids de agentes a esperar. Devueltos por spawn_agents. Max 8 por call.',
+    ),
+  timeout_sec: z
+    .number()
+    .int()
+    .min(1)
+    .max(1200)
+    .optional()
+    .describe('Timeout en segundos. Default 300. Max 1200.'),
+} as const;
+
+export type WaitForAgentsArgs = {
+  agent_ids: string[];
+  timeout_sec?: number;
+};

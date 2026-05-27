@@ -5,15 +5,19 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { DashboardBridge } from '../dashboard/bridge';
 import { ts } from '../runtime/log';
+import { secondsToMs } from '../shared/format';
 import {
   CANCEL_AGENT_INPUT_SHAPE,
   GET_AGENT_LOG_INPUT_SHAPE,
   LIST_AGENTS_INPUT_SHAPE,
   SPAWN_AGENTS_INPUT_SHAPE,
+  WAIT_FOR_AGENTS_INPUT_SHAPE,
   type CancelAgentArgs,
   type GetAgentLogArgs,
   type SpawnAgentsArgs,
+  type WaitForAgentsArgs,
 } from './types';
+import type { WaitForAgentsResult } from '../shared/dashboard-protocol';
 
 export interface OrchestratorMcpServerOptions {
   channel: vscode.OutputChannel;
@@ -69,6 +73,7 @@ export class OrchestratorMcpServer {
     this.registerListAgents(server);
     this.registerGetAgentLog(server);
     this.registerCancelAgent(server);
+    this.registerWaitForAgents(server);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -304,6 +309,90 @@ export class OrchestratorMcpServer {
                 type: 'text' as const,
                 text: JSON.stringify(
                   { error: msg, agent_id: args.agent_id },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+      },
+    );
+  }
+
+  // === Tool: wait_for_agents ===
+  //
+  // Long-poll bloqueante: espera a que todos los agent_ids lleguen
+  // a estado terminal o venza timeout_sec. Si vence con pending, el
+  // chat re-llama con los pending (patrón retry).
+  //
+  // El cliente claude-code corta requests >~600s en algunos transports;
+  // por eso el shape Zod limita timeout_sec a 1200 max y el caller
+  // típico usa el default 300s. Si la tarea real toma 30min, el chat
+  // hace 6 calls de 5min cada una — patrón estándar del ecosistema
+  // (ver research/MCP_ASYNC_FAN_IN_RESEARCH.md).
+  //
+  // La lógica vive en `waitForAgents` público para testeo directo.
+
+  /**
+   * Espera a los agent_ids con long-poll. Lee `stuckDetectionSec` del
+   * setting al momento de la llamada (respeta cambios live de config).
+   */
+  async waitForAgents(args: WaitForAgentsArgs): Promise<WaitForAgentsResult> {
+    const timeoutSec = args.timeout_sec ?? 300;
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const stuckSec = cfg.get<number>('stuckDetectionSec', 60);
+    this.channel.appendLine(
+      `[${ts()}] [mcp] wait_for_agents agents=${args.agent_ids.length} timeoutSec=${timeoutSec} stuckSec=${stuckSec}`,
+    );
+    return this.bridge.waitForAgents({
+      agentIds: args.agent_ids,
+      timeoutMs: secondsToMs(timeoutSec),
+      stuckThresholdMs: secondsToMs(stuckSec),
+    });
+  }
+
+  private registerWaitForAgents(server: McpServer): void {
+    server.registerTool(
+      'wait_for_agents',
+      {
+        title: 'Wait for agents',
+        description:
+          'Bloquea hasta que todos los agent_ids alcancen estado terminal (done/failed/cancelled) ' +
+          'o venza timeout_sec (default 300s, max 1200s). Devuelve `results` para terminados + ' +
+          '`pending` para los que siguen corriendo (con `last_message_partial` y `suspected_stuck`). ' +
+          '\n\nPATRÓN RETRY: si `timed_out: true` y `pending` tiene items, re-llamar la tool con ' +
+          'los pending agent_ids para seguir esperando. Repetir hasta que `pending` quede vacío o ' +
+          'decidir cancelar con cancel_agent.\n\n' +
+          'NOTAS: para tareas ligeras (consulta web, código corto) usar timeout_sec=30-60. Para ' +
+          'tareas pesadas (migraciones, audits) usar 600-1200. El plugin tiene un cap defensivo ' +
+          'global (`claudeOrchestrator.maxAgentRuntimeSec`, default 2000s) que cancela agentes ' +
+          'que viven más de eso con `reason: max_runtime_exceeded`.',
+        inputSchema: WAIT_FOR_AGENTS_INPUT_SHAPE,
+      },
+      async (args: WaitForAgentsArgs) => {
+        try {
+          const payload = await this.waitForAgents(args);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(payload, null, 2),
+              },
+            ],
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.channel.appendLine(
+            `[${ts()}] [mcp] !!! wait_for_agents failed: ${msg}`,
+          );
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  { error: msg, agent_ids: args.agent_ids },
                   null,
                   2,
                 ),

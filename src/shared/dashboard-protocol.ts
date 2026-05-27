@@ -187,6 +187,65 @@ export interface AgentCompletedResult {
   reason?: string;
 }
 
+// === wait_for_agents (MCP tool) ===
+
+/**
+ * Resultado por agente terminado dentro del wait. Wire compacto del
+ * StoredAgent en estado terminal: lo lee el chat externo para usar
+ * el output del agente como contexto.
+ */
+export interface WaitForAgentsAgentResult {
+  agent_id: string;
+  status: Exclude<AgentStatus, 'running' | 'pending'>;
+  /**
+   * Último text block que el agente emitió mid-stream. Para `done`
+   * es el mensaje de cierre. Para `cancelled`/`failed` puede ser el
+   * último progreso ANTES del corte (NO el string del runner tipo
+   * "User cancelled" — preferimos lo que el agente alcanzó a decir).
+   */
+  last_message: string | null;
+  duration_ms: number;
+  tokens_used: number;
+  model?: string;
+  /**
+   * Razón terminal cuando aplica: `user_cancelled`, `ide_restart`,
+   * `max_runtime_exceeded`, `not_found` (cuando el agentId no
+   * existe en el registry).
+   */
+  reason?: string;
+}
+
+/**
+ * Resultado por agente que SIGUE running cuando el wait_for_agents
+ * timed out. Incluye `last_message_partial` (lo que dijo el agente
+ * hasta ahora) + `suspected_stuck` (flag heurístico de inactividad).
+ */
+export interface WaitForAgentsAgentPending {
+  agent_id: string;
+  /** "running" para los pending; otros estados no aparecen acá. */
+  status: 'running';
+  last_message_partial: string | null;
+  /** ISO timestamp del último evento que el bridge procesó. */
+  last_activity_at: string;
+  /**
+   * `true` si `now - last_activity_at > stuckDetectionSec` (setting
+   * `claudeOrchestrator.stuckDetectionSec`, default 60s). El bridge
+   * NO cancela el agente — solo señala. El chat externo decide.
+   */
+  suspected_stuck: boolean;
+}
+
+/**
+ * Respuesta completa del MCP tool `wait_for_agents`. Compatible con
+ * el patrón retry: si `timed_out: true` y `pending: [...]`, el chat
+ * externo re-llama con los pending agent_ids.
+ */
+export interface WaitForAgentsResult {
+  results: WaitForAgentsAgentResult[];
+  pending: WaitForAgentsAgentPending[];
+  timed_out: boolean;
+}
+
 // === Eventos Extension → Webview ===
 
 /**

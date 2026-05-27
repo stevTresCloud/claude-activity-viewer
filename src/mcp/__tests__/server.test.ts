@@ -17,10 +17,12 @@
  * test solo importa el método `cancel(id) → boolean`.
  * ================================================================ */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as vscode from 'vscode';
 import type { DashboardBridge } from '../../dashboard/bridge';
+import type { WaitForAgentsResult } from '../../shared/dashboard-protocol';
 import { OrchestratorMcpServer } from '../server';
+import { __resetVscode, __setConfig } from '../../__mocks__/vscode';
 
 function makeChannel(): vscode.OutputChannel {
   return {
@@ -74,5 +76,76 @@ describe('OrchestratorMcpServer · cancelAgent', () => {
       throw new Error('boom');
     });
     expect(() => server.cancelAgent('agent-x')).toThrow('boom');
+  });
+});
+
+// === wait_for_agents handler tests ===
+
+function makeServerWithWait(
+  waitImpl: (opts: {
+    agentIds: string[];
+    timeoutMs: number;
+    stuckThresholdMs: number;
+  }) => Promise<WaitForAgentsResult>,
+) {
+  const bridge = {
+    cancel: vi.fn(() => false),
+    waitForAgents: vi.fn(waitImpl),
+  } as unknown as DashboardBridge;
+  const server = new OrchestratorMcpServer({
+    channel: makeChannel(),
+    serverInfo: { name: 'test', version: '0.0.0' },
+    bridge,
+    allowedHosts: ['127.0.0.1:0'],
+  });
+  return {
+    server,
+    bridge: bridge as unknown as {
+      waitForAgents: ReturnType<typeof vi.fn>;
+    },
+  };
+}
+
+describe('OrchestratorMcpServer · waitForAgents', () => {
+  beforeEach(() => {
+    __resetVscode();
+  });
+
+  it('usa default 300s timeout + setting stuckDetectionSec convertido a ms', async () => {
+    __setConfig('claudeOrchestrator', 'stuckDetectionSec', 45);
+    const expected: WaitForAgentsResult = {
+      results: [
+        {
+          agent_id: 'a',
+          status: 'done',
+          last_message: 'hello',
+          duration_ms: 1000,
+          tokens_used: 100,
+        },
+      ],
+      pending: [],
+      timed_out: false,
+    };
+    const { server, bridge } = makeServerWithWait(() => Promise.resolve(expected));
+    const result = await server.waitForAgents({ agent_ids: ['a'] });
+    expect(result).toEqual(expected);
+    expect(bridge.waitForAgents).toHaveBeenCalledWith({
+      agentIds: ['a'],
+      timeoutMs: 300_000,
+      stuckThresholdMs: 45_000,
+    });
+  });
+
+  it('respeta timeout_sec explícito + fallback de stuckDetectionSec a 60s default', async () => {
+    // Sin __setConfig — el cliente lee el default (60s).
+    const { server, bridge } = makeServerWithWait(() =>
+      Promise.resolve({ results: [], pending: [], timed_out: true }),
+    );
+    await server.waitForAgents({ agent_ids: ['a', 'b'], timeout_sec: 60 });
+    expect(bridge.waitForAgents).toHaveBeenCalledWith({
+      agentIds: ['a', 'b'],
+      timeoutMs: 60_000,
+      stuckThresholdMs: 60_000,
+    });
   });
 });

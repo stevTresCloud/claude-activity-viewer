@@ -40,7 +40,7 @@ import {
   type ModelAlias,
 } from '../runtime/types';
 import { logAgentEvent, ts } from '../runtime/log';
-import { capitalize } from '../shared/format';
+import { capitalize, secondsToMs } from '../shared/format';
 import {
   LOG_RING_MAX,
   type AgentCompletedResult,
@@ -48,6 +48,9 @@ import {
   type AgentStatus,
   type DashboardEventToWebview,
   type LogEntry,
+  type WaitForAgentsAgentPending,
+  type WaitForAgentsAgentResult,
+  type WaitForAgentsResult,
 } from '../shared/dashboard-protocol';
 
 // === Constantes ===
@@ -87,6 +90,41 @@ interface StoredAgent {
   cwd: string;
   prompt: string;
   log: LogEntry[];
+  /**
+   * Último text block que el agente emitió. Se actualiza con cada
+   * evento `type: 'text'` del runner. Para agentes `done` típicamente
+   * queda el mensaje de cierre. Para `cancelled`/`failed`, queda el
+   * último progreso ANTES del corte — NO incluye el `finalResponse`
+   * sintético del runner ("User cancelled", error trace) que viene
+   * por otro path. Decisión deliberada: el último avance del agente
+   * es más útil para el chat externo que el string de control.
+   *
+   * Mid-run sirve como `last_message_partial` para `wait_for_agents`:
+   * el chat externo ve qué está diciendo el agente sin tener que
+   * pollear el log completo.
+   *
+   * Vive fuera del wire AgentSnapshot porque la UI del sidebar no
+   * lo renderiza (los logs van por evento separado al webview).
+   * Solo el handler MCP lo consume vía registry.
+   */
+  lastAssistantMessage?: string;
+  /**
+   * Epoch ms del último evento que el bridge procesó para este
+   * agente. Se updatea con CUALQUIER tipo de evento (thinking, text,
+   * tool_use, tool_result, usage, status, session_id, model). Lo usa
+   * `wait_for_agents` para detectar agentes posiblemente pegados —
+   * si `now - lastActivityAt > stuckDetectionSec`, se marca
+   * `suspected_stuck: true` en la respuesta. NO mata al agente; la
+   * decisión de cancelar queda al chat externo.
+   */
+  lastActivityAt: number;
+  /**
+   * Epoch ms del arranque del agente. Lo usa el cap defensivo
+   * `maxAgentRuntimeSec`: si `now - startedAt > maxRuntimeMs`, el
+   * bridge cancela el agente con `reason: 'max_runtime_exceeded'`.
+   * Independiente de los listeners de wait_for_agents.
+   */
+  startedAt: number;
 }
 
 /** Input para `bridge.spawn`. Conecta MCP handler / palette command. */
@@ -216,6 +254,12 @@ export class DashboardBridge {
   // a array de forma reproducible.
   private readonly agents = new Map<string, StoredAgent>();
   private readonly aborts = new Map<string, AbortController>();
+  // Timers del cap defensivo `maxAgentRuntimeSec`. Cada agente
+  // arranca con un setTimeout que, si vence antes de la terminación
+  // natural, setea `snapshot.reason='max_runtime_exceeded'` directo
+  // y llama bridge.cancel. El bloque terminal del run() respeta el
+  // reason ya seteado (no lo pisa con el finalResponse del runner).
+  private readonly maxRuntimeTimers = new Map<string, NodeJS.Timeout>();
   // Promises de runs en vuelo. Las trackeamos para que dispose()
   // pueda esperarlas con allSettled antes del flush final — si no
   // las espera, el flush captura el state PRE-terminal de los
@@ -308,6 +352,19 @@ export class DashboardBridge {
         entry.snapshot.reason = 'ide_restart';
         entry.snapshot.completedAtIso = new Date(now).toISOString();
         orphaned++;
+      }
+
+      // === Defaults para campos nuevos ===
+      // Snapshots persistidos antes de 1.5.h no tienen lastActivityAt
+      // ni startedAt. Defensive defaults: tratarlos como "actividad
+      // ahora mismo" (no van a estar running de nuevo después del
+      // recovery de huérfanos arriba) — para items en RECENT estos
+      // campos no se usan, solo sirven mientras un agente está vivo.
+      if (typeof entry.lastActivityAt !== 'number') {
+        entry.lastActivityAt = now;
+      }
+      if (typeof entry.startedAt !== 'number') {
+        entry.startedAt = now;
       }
 
       this.agents.set(entry.snapshot.id, entry);
@@ -429,16 +486,43 @@ export class DashboardBridge {
       contextUsedPct: 0,
     };
 
+    const nowMs = Date.now();
     const stored: StoredAgent = {
       snapshot,
       cwd: input.cwd,
       prompt: input.prompt,
       log: [],
+      lastActivityAt: nowMs,
+      startedAt: nowMs,
     };
     this.agents.set(agentId, stored);
 
     const abort = new AbortController();
     this.aborts.set(agentId, abort);
+
+    // WHY lectura inline (no en constructor): cada spawn lee el valor
+    // vigente del setting. Caveat: si el setting BAJA tras spawn, los
+    // agentes ya corriendo respetan el cap original (su timer no se
+    // recalcula). Solo el próximo spawn ve el cambio.
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const maxRuntimeSec = cfg.get<number>('maxAgentRuntimeSec', 2000);
+    const maxRuntimeMs = secondsToMs(Math.max(60, maxRuntimeSec));
+    const maxRuntimeTimer = setTimeout(() => {
+      this.maxRuntimeTimers.delete(agentId);
+      const live = this.agents.get(agentId);
+      if (!live || live.snapshot.status !== 'running') return;
+      // Race-safe: si alguien (user via cancel_agent, ide_restart, etc.)
+      // ya seteó un reason, NO lo pisamos. Ej: user click cancel ~0ms
+      // antes de que el timer dispare — el cap encontraría reason
+      // ya seteado y respeta la decisión humana.
+      if (live.snapshot.reason) return;
+      this.channel.appendLine(
+        `[${ts()}] [bridge] max_runtime_exceeded id=${agentId} after ${maxRuntimeSec}s — cancelling`,
+      );
+      live.snapshot.reason = 'max_runtime_exceeded';
+      this.cancel(agentId);
+    }, maxRuntimeMs);
+    this.maxRuntimeTimers.set(agentId, maxRuntimeTimer);
 
     this.channel.appendLine(
       `[${ts()}] [bridge] spawn id=${agentId} name=${name} project=${context.project} cwd=${input.cwd}`,
@@ -646,6 +730,135 @@ export class DashboardBridge {
   }
 
   // ====================================================================
+  // === wait_for_agents ================================================
+  // ====================================================================
+
+  /**
+   * Long-poll bloqueante: espera a que todos los `agentIds` lleguen a
+   * estado terminal (done/failed/cancelled) o a que venza `timeoutMs`.
+   * Devuelve un wire combinado: `results` para los terminados +
+   * `pending` para los que siguen running con su `last_message_partial`
+   * y flag `suspected_stuck` si llevan demasiado sin emitir eventos.
+   *
+   * Diseño event-driven (no polling): se suscribe a `onAgentCompleted`
+   * filtrando por los `agentIds` del request. Cuando todos terminaron,
+   * resuelve inmediato. Si vence el timer, resuelve con `timed_out=true`.
+   * Garantía: el listener se des-registra siempre (resolve y timeout
+   * path).
+   *
+   * El patrón retry del chat: cuando recibe `timed_out: true`, re-llama
+   * con los `pending` agent_ids. La description del tool MCP explicita
+   * este contrato.
+   *
+   * AgentIds que no existen en el registry → result con
+   * `reason: 'not_found'` (no error operacional; estado válido).
+   */
+  async waitForAgents(opts: {
+    agentIds: string[];
+    timeoutMs: number;
+    stuckThresholdMs: number;
+  }): Promise<WaitForAgentsResult> {
+    const { agentIds, timeoutMs, stuckThresholdMs } = opts;
+
+    // Snapshot inicial: ¿quién está pending? Cualquier status no-terminal
+    // se considera pending (running + pending). Simétrico al check del
+    // helper `buildWaitResult`.
+    const pendingSet = new Set<string>();
+    for (const id of agentIds) {
+      const stored = this.agents.get(id);
+      if (!stored) continue;
+      const s = stored.snapshot.status;
+      if (s !== 'done' && s !== 'failed' && s !== 'cancelled') {
+        pendingSet.add(id);
+      }
+    }
+
+    // Si todos están terminados (o no existen), retorna inmediato sin
+    // timer ni listener. Cheap-path para el caller que pollea.
+    if (pendingSet.size === 0) {
+      return this.buildWaitResult(agentIds, stuckThresholdMs, false);
+    }
+
+    // Subscribimos al canal de "agente entró en terminal" y restamos
+    // del set conforme lleguen. Si el set queda vacío antes del timer,
+    // resolve inmediato. Si vence el timer, resolve con lo que tenga.
+    const timedOut = await new Promise<boolean>((resolve) => {
+      const off = this.onAgentCompleted((event) => {
+        if (pendingSet.delete(event.agentId) && pendingSet.size === 0) {
+          off();
+          clearTimeout(timer);
+          resolve(false);
+        }
+      });
+      const timer = setTimeout(() => {
+        off();
+        resolve(true);
+      }, timeoutMs);
+    });
+
+    return this.buildWaitResult(agentIds, stuckThresholdMs, timedOut);
+  }
+
+  /**
+   * Construye el `WaitForAgentsResult` final a partir del snapshot
+   * del registry. Helper puro: lee el estado actual de cada agente y
+   * lo traduce al wire según su `snapshot.status` actual. No mutates.
+   */
+  private buildWaitResult(
+    agentIds: string[],
+    stuckThresholdMs: number,
+    timedOut: boolean,
+  ): WaitForAgentsResult {
+    const now = Date.now();
+    const results: WaitForAgentsAgentResult[] = [];
+    const pending: WaitForAgentsAgentPending[] = [];
+
+    for (const id of agentIds) {
+      const stored = this.agents.get(id);
+      if (!stored) {
+        // Agent_id no existe en el registry — estado válido para el
+        // caller (puede haber confundido un id). Wire-out compatible.
+        results.push({
+          agent_id: id,
+          status: 'failed',
+          last_message: null,
+          duration_ms: 0,
+          tokens_used: 0,
+          reason: 'not_found',
+        });
+        continue;
+      }
+      const status = stored.snapshot.status;
+      if (status === 'done' || status === 'failed' || status === 'cancelled') {
+        const snap = stored.snapshot;
+        results.push({
+          agent_id: id,
+          status,
+          last_message: stored.lastAssistantMessage ?? null,
+          duration_ms: snap.durationMs ?? 0,
+          tokens_used: snap.tokensUsed ?? 0,
+          model: snap.model,
+          reason: snap.reason,
+        });
+      } else {
+        // 'running' o 'pending' — para el wait, ambos van a pending
+        // del wire. El caller no distingue "todavía no arrancó" vs
+        // "corriendo": en ambos casos hay que re-pollear.
+        const lastActIso = new Date(stored.lastActivityAt).toISOString();
+        pending.push({
+          agent_id: id,
+          status: 'running',
+          last_message_partial: stored.lastAssistantMessage ?? null,
+          last_activity_at: lastActIso,
+          suspected_stuck: now - stored.lastActivityAt > stuckThresholdMs,
+        });
+      }
+    }
+
+    return { results, pending, timed_out: timedOut };
+  }
+
+  // ====================================================================
   // === Runner integration =============================================
   // ====================================================================
 
@@ -677,6 +890,20 @@ export class DashboardBridge {
         onEvent: (event) => {
           // Log al OutputChannel para diagnóstico (igual que MCP/palette ya hacían).
           logAgentEvent(this.channel, event);
+
+          // === Tracking para wait_for_agents ===
+          // Cualquier evento marca actividad → resetea el threshold de
+          // suspected_stuck. text blocks además acumulan en
+          // lastAssistantMessage como progress del agente (lo lee el
+          // chat externo via wait_for_agents para mostrar al user qué
+          // está diciendo el agente mid-run).
+          const tracked = this.agents.get(agentId);
+          if (tracked) {
+            tracked.lastActivityAt = Date.now();
+            if (event.type === 'text' && event.text) {
+              tracked.lastAssistantMessage = event.text;
+            }
+          }
 
           // === Traducción a LogEntry + posibles metadata updates ===
           const entry = translateToLogEntry(event);
@@ -784,7 +1011,14 @@ export class DashboardBridge {
         stored.snapshot.contextUsedPct = lastContextPct;
         stored.snapshot.currentTool = lastTool;
         stored.snapshot.subtitle = lastSubtitle;
-        if (wireStatus !== 'done' && result.finalResponse) {
+        // Si el cap defensivo ya seteó reason='max_runtime_exceeded'
+        // antes del cancel, NO pisamos con el finalResponse del runner
+        // (que en cancel queda como "User cancelled").
+        if (
+          stored.snapshot.reason !== 'max_runtime_exceeded' &&
+          wireStatus !== 'done' &&
+          result.finalResponse
+        ) {
           stored.snapshot.reason = result.finalResponse;
         }
       }
@@ -814,6 +1048,14 @@ export class DashboardBridge {
       }
     } finally {
       this.aborts.delete(agentId);
+      // Cleanup del cap defensivo: cuando el agente termina natural
+      // (sin que el timer dispare), cancelamos el setTimeout para no
+      // ejecutar un cancel inútil después.
+      const tmr = this.maxRuntimeTimers.get(agentId);
+      if (tmr) {
+        clearTimeout(tmr);
+        this.maxRuntimeTimers.delete(agentId);
+      }
       this.schedulePersist();
       // El agente acaba de transicionar running → done/failed/cancelled.
       // El bloque terminal mutó `stored.snapshot.status` directo (sin
@@ -948,6 +1190,18 @@ export class DashboardBridge {
     // Cancelamos cualquier agente activo: la EDH se está apagando.
     // Sus subprocess se llevarán "cancelled" como status.
     this.cancelAll();
+
+    // Defensive: limpiar timers del cap maxAgentRuntimeSec. En el
+    // happy path el `finally` del run() los limpia uno por uno cuando
+    // resuelven los runs activos arriba. Esta limpieza extra cubre el
+    // caso patológico donde algún timer quedó colgado (run() lanzó
+    // fuera del try/finally, etc.) — sin esto, el callback puede
+    // dispararse después del dispose y appendLine sobre un channel
+    // posiblemente disposed.
+    for (const t of this.maxRuntimeTimers.values()) {
+      clearTimeout(t);
+    }
+    this.maxRuntimeTimers.clear();
 
     // Esperamos a que cada run() resuelva su bloque terminal
     // (status='cancelled' + completedAtIso) antes del flush final.

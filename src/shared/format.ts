@@ -138,3 +138,14 @@ export function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + '…';
 }
+
+/**
+ * Convierte segundos a milisegundos. Centraliza el cast en un solo
+ * lugar: los settings del plugin (`maxAgentRuntimeSec`,
+ * `stuckDetectionSec`) y el shape MCP (`timeout_sec`) viven en
+ * segundos por DX, pero el código operativo (setTimeout, comparación
+ * con Date.now()) usa ms.
+ */
+export function secondsToMs(s: number): number {
+  return s * 1000;
+}

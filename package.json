@@ -99,6 +99,18 @@
           ],
           "description": "Default Claude model used when an agent is spawned without an explicit model. Applies to MCP spawn_agents calls that omit the 'model' field and to the palette command 'Test Agent' when the user picks the default option."
         },
+        "claudeOrchestrator.maxAgentRuntimeSec": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 60,
+          "description": "Tiempo máximo (en segundos) que un agente puede estar vivo. Pasado ese tiempo, el bridge lo cancela automáticamente con status=failed y reason=max_runtime_exceeded. Cap defensivo contra agentes pegados. Subí este número para tareas largas (migraciones, audits completos). Default: 2000 (~33 min)."
+        },
+        "claudeOrchestrator.stuckDetectionSec": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "description": "Si un agente running no emite ningún evento durante N segundos, wait_for_agents lo marca con suspected_stuck=true en la respuesta (NO lo cancela — el chat decide). Subí este número si tus tareas legítimamente quedan en silencio más tiempo entre eventos (Read de archivos grandes, Bash silenciosos). Default: 60s."
+        },
         "claudeOrchestrator.resumeIn": {
           "type": "string",
           "enum": ["chat", "terminal"],

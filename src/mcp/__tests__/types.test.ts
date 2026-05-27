@@ -22,12 +22,14 @@ import {
   GET_AGENT_LOG_INPUT_SHAPE,
   LIST_AGENTS_INPUT_SHAPE,
   SPAWN_AGENTS_INPUT_SHAPE,
+  WAIT_FOR_AGENTS_INPUT_SHAPE,
 } from '../types';
 
 const schema = z.object(SPAWN_AGENTS_INPUT_SHAPE);
 const listAgentsSchema = z.object(LIST_AGENTS_INPUT_SHAPE);
 const getAgentLogSchema = z.object(GET_AGENT_LOG_INPUT_SHAPE);
 const cancelAgentSchema = z.object(CANCEL_AGENT_INPUT_SHAPE);
+const waitForAgentsSchema = z.object(WAIT_FOR_AGENTS_INPUT_SHAPE);
 
 const validTask = {
   prompt: 'hola',
@@ -212,6 +214,56 @@ describe('CANCEL_AGENT_INPUT_SHAPE — args y bounds', () => {
 
   it('rechaza agent_id ausente', () => {
     const result = cancelAgentSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('WAIT_FOR_AGENTS_INPUT_SHAPE — args y bounds', () => {
+  it('agent_ids mínimo (1 id, sin timeout) pasa con defaults', () => {
+    const result = waitForAgentsSchema.safeParse({ agent_ids: ['abc'] });
+    expect(result.success).toBe(true);
+  });
+
+  it('agent_ids + timeout_sec dentro de bounds pasa', () => {
+    const result = waitForAgentsSchema.safeParse({
+      agent_ids: ['a', 'b', 'c'],
+      timeout_sec: 600,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rechaza agent_ids vacío (min 1)', () => {
+    const result = waitForAgentsSchema.safeParse({ agent_ids: [] });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza agent_ids > 8 (mismo cap que spawn_agents)', () => {
+    const result = waitForAgentsSchema.safeParse({
+      agent_ids: Array.from({ length: 9 }, (_, i) => `a${i}`),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza timeout_sec > 1200 (max 20min)', () => {
+    const result = waitForAgentsSchema.safeParse({
+      agent_ids: ['a'],
+      timeout_sec: 1500,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza timeout_sec <= 0', () => {
+    const result = waitForAgentsSchema.safeParse({
+      agent_ids: ['a'],
+      timeout_sec: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza agent_id vacío dentro del array', () => {
+    const result = waitForAgentsSchema.safeParse({
+      agent_ids: ['valid', ''],
+    });
     expect(result.success).toBe(false);
   });
 });

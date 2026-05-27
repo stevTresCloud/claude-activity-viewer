@@ -1311,4 +1311,256 @@ describe('DashboardBridge — integración', () => {
     expect(ours?.log[0]?.text).toBe('entry-1');
     expect(ours?.log[999]?.text).toBe('entry-1000');
   });
+
+  // === wait_for_agents ===
+  //
+  // Test del long-poll del bridge. Diseño event-driven: cuando el
+  // agente entra en estado terminal, onAgentCompleted dispara y el
+  // wait resuelve. Para test reproducible con fake timers usamos
+  // vi.useFakeTimers + advanceTimers.
+
+  describe('waitForAgents', () => {
+    it('retorna inmediato cuando todos los agentes ya terminaron', async () => {
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'hi',
+        cwd: '/repos/myproj',
+      });
+      runner.emit({ type: 'text', text: 'final message' });
+      runner.finish({ status: 'completed', durationMs: 2000 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.timed_out).toBe(false);
+      expect(result.pending).toEqual([]);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]).toMatchObject({
+        agent_id: agentId,
+        status: 'done',
+        last_message: 'final message',
+        duration_ms: 2000,
+      });
+    });
+
+    it('agent_id desconocido retorna result con reason: not_found', async () => {
+      const result = await bridge.waitForAgents({
+        agentIds: ['ghost-uuid'],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.timed_out).toBe(false);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]).toMatchObject({
+        agent_id: 'ghost-uuid',
+        status: 'failed',
+        reason: 'not_found',
+        last_message: null,
+      });
+    });
+
+    it('captura last_message_partial mid-run para agentes pending', async () => {
+      vi.useFakeTimers();
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({
+        prompt: 'long task',
+        cwd: '/repos/myproj',
+      });
+      runner.emit({ type: 'text', text: 'progreso paso 1' });
+      runner.emit({ type: 'text', text: 'progreso paso 2' });
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      // Avanzamos el timer del wait al timeout sin que el agente termine.
+      await vi.advanceTimersByTimeAsync(150);
+      const result = await waitPromise;
+
+      expect(result.timed_out).toBe(true);
+      expect(result.pending).toHaveLength(1);
+      expect(result.pending[0]).toMatchObject({
+        agent_id: agentId,
+        status: 'running',
+        last_message_partial: 'progreso paso 2',
+        suspected_stuck: false,
+      });
+      expect(result.results).toEqual([]);
+
+      vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('marca suspected_stuck cuando el agente lleva > stuckThresholdMs sin actividad', async () => {
+      vi.useFakeTimers();
+      const baseTime = new Date('2026-05-26T20:00:00Z');
+      vi.setSystemTime(baseTime);
+
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({
+        prompt: 'silent task',
+        cwd: '/repos/myproj',
+      });
+      // Avanzamos 90s sin emitir ningún evento — el agente está en silencio.
+      vi.setSystemTime(new Date(baseTime.getTime() + 90_000));
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.advanceTimersByTimeAsync(150);
+      const result = await waitPromise;
+
+      expect(result.pending).toHaveLength(1);
+      expect(result.pending[0].suspected_stuck).toBe(true);
+
+      vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('resuelve sin timeout cuando el agente termina mid-wait', async () => {
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'task',
+        cwd: '/repos/myproj',
+      });
+
+      // Disparamos el wait en paralelo; después emitimos finish.
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      runner.emit({ type: 'text', text: 'done!' });
+      runner.finish({ status: 'completed', durationMs: 500 });
+      await finished;
+
+      const result = await waitPromise;
+      expect(result.timed_out).toBe(false);
+      expect(result.pending).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        agent_id: agentId,
+        status: 'done',
+        last_message: 'done!',
+      });
+    });
+
+    it('cap defensivo dispara: reason=max_runtime_exceeded + timer limpiado', async () => {
+      __setConfig('claudeOrchestrator', 'maxAgentRuntimeSec', 60);
+      vi.useFakeTimers();
+
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'long task',
+        cwd: '/repos/myproj',
+      });
+      runner.emit({ type: 'text', text: 'progreso pre-cap' });
+
+      // Avanzamos 60s — el cap-timer debería dispararse, llamar
+      // bridge.cancel y setear reason='max_runtime_exceeded' antes
+      // del bloque terminal.
+      await vi.advanceTimersByTimeAsync(60_500);
+      runner.finish({
+        status: 'cancelled',
+        finalResponse: 'User cancelled',
+        durationMs: 60_000,
+      });
+      await finished;
+
+      // El reason del cap NO fue pisado por el finalResponse del runner.
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.results[0].reason).toBe('max_runtime_exceeded');
+      expect(result.results[0].status).toBe('cancelled');
+
+      vi.useRealTimers();
+    });
+
+    it('race cap-vs-cancel: si user cancela primero, el cap respeta su reason', async () => {
+      __setConfig('claudeOrchestrator', 'maxAgentRuntimeSec', 60);
+      vi.useFakeTimers();
+
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'task',
+        cwd: '/repos/myproj',
+      });
+      runner.emit({ type: 'text', text: 'midway' });
+
+      // User setea reason manualmente (simula que algo seteó reason
+      // antes del cap-timer). El cap-timer DEBE respetar y no pisarlo.
+      const stored = bridge.listAgents().find((a) => a.id === agentId);
+      expect(stored).toBeDefined();
+      // Acceso vía la API pública: el cap-timer entra al callback con
+      // un snapshot que ya tiene reason. Lo seteamos via cancel + log.
+      // Como no hay setter público para reason, simulamos llamando
+      // cancel y avanzando — el bloque terminal del run() setea reason
+      // desde finalResponse, lo que activa el guard del cap.
+      bridge.cancel(agentId);
+      runner.finish({
+        status: 'cancelled',
+        finalResponse: 'User cancelled by hand',
+        durationMs: 100,
+      });
+      await finished;
+
+      // Ahora avanzamos al cap-timer. El callback debe encontrar reason
+      // ya seteado y retornar sin pisar.
+      await vi.advanceTimersByTimeAsync(60_500);
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      // reason vino del finalResponse del runner, NO de max_runtime_exceeded.
+      expect(result.results[0].reason).toBe('User cancelled by hand');
+      expect(result.results[0].reason).not.toBe('max_runtime_exceeded');
+
+      vi.useRealTimers();
+    });
+
+    it('mix: un agente terminado + uno pending devuelve ambos correctamente', async () => {
+      vi.useFakeTimers();
+      bridge.attachWebview(webview as never);
+
+      // Agente 1 — termina rápido.
+      const r1 = bridge.spawn({ prompt: 'fast', cwd: '/repos/p1' });
+      runner.emit({ type: 'text', text: 'agente1 final' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await r1.finished;
+
+      // Agente 2 — sigue corriendo durante el wait. Reusamos el mismo
+      // runner; el FakeAgentRunner solo soporta un resolver a la vez.
+      const r2 = bridge.spawn({ prompt: 'slow', cwd: '/repos/p2' });
+      runner.emit({ type: 'text', text: 'agente2 procesando...' });
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [r1.agentId, r2.agentId],
+        timeoutMs: 100,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.advanceTimersByTimeAsync(150);
+      const result = await waitPromise;
+
+      expect(result.timed_out).toBe(true);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].agent_id).toBe(r1.agentId);
+      expect(result.results[0].status).toBe('done');
+      expect(result.pending).toHaveLength(1);
+      expect(result.pending[0].agent_id).toBe(r2.agentId);
+      expect(result.pending[0].last_message_partial).toBe('agente2 procesando...');
+
+      vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+  });
 });
