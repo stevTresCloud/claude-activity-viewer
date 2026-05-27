@@ -20,7 +20,7 @@
 
 import { computed } from 'vue';
 import type { Agent, AgentStatus } from '../../types';
-import { formatElapsed, formatTokens } from '../../utils/format';
+import { formatCostUsd, formatElapsed, formatTokens } from '../../utils/format';
 import { useShowDetail } from '../../composables/useShowDetail';
 
 const props = defineProps<{
@@ -66,16 +66,19 @@ function presentationFor(status: AgentStatus) {
 
 const presentation = computed(() => presentationFor(props.agent.status));
 
-// === Meta — duración + tokens si done ===
+// === Meta — duración + tokens + costo si done ===
 //
 // HANDOFF §2.10 dicta misma grilla "Xm Ys" para done/failed/cancelled.
-// done agrega "· {tokens}k" porque tiene tokensUsed; failed/cancelled
-// dejan solo la duración.
+// done agrega "· {tokens}k · ${cost}" porque tiene cost/tokens útiles;
+// failed/cancelled dejan solo la duración para no contaminar visual con
+// métricas parciales que no representan trabajo completo.
 
 const meta = computed(() => {
   const duration = formatElapsed(props.agent.durationMs);
   if (props.agent.status === 'done') {
-    return `${duration} · ${formatTokens(props.agent.tokensUsed)}`;
+    const tokens = formatTokens(props.agent.tokensUsed);
+    const cost = formatCostUsd(props.agent.costUsd);
+    return `${duration} · ${tokens} · ${cost}`;
   }
   return duration;
 });

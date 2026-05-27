@@ -7,10 +7,13 @@ import { capitalize } from '../shared/format';
 // Prompt fijo del comando "Test Agent". Pensado para ejercer el ciclo
 // completo SDK → bridge → webview + dar tiempo a cancelar mid-stream.
 // Usa tools (Glob + Read) sobre el cwd sin modificar archivos.
+// Es agnóstico al workspace para que sirva en cualquier proyecto:
+// detecta los primeros archivos significativos sin asumir layout.
 const TEST_PROMPT =
-  'Listá los archivos .ts dentro de src/ del directorio actual. ' +
-  'Por cada uno, leelo y dame un resumen de 1 línea de qué hace. ' +
-  'No edites nada.';
+  'Listá los primeros 5 archivos relevantes (código fuente, README, ' +
+  'config) del directorio actual con Glob o LS. Por cada uno, leelo ' +
+  'con Read y dame un resumen breve de 1 línea de qué hace. No ' +
+  'edites nada. Respondé en español.';
 
 /**
  * Registra los comandos del palette para lanzar/cancelar un agente

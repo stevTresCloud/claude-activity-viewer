@@ -126,6 +126,17 @@ export interface AgentSnapshot {
   contextTokens?: number;
   currentTool?: string;
   tokensUsed?: number;
+  /**
+   * Costo billable acumulado en USD (lo que cobra Anthropic por este
+   * agente). Viene del SDK como `total_cost_usd` en el `result` final
+   * y se actualiza en cada turn vía el `usage` event. Distinto a
+   * `tokensUsed`: tokens es cuántos tokens consumió, `costUsd` es
+   * cuánta plata salió de la cuenta (depende del modelo + cache hits).
+   *
+   * Opcional porque en runs muy cortos puede llegar como 0 antes del
+   * primer turn completo. La UI muestra "—" cuando es undefined o 0.
+   */
+  costUsd?: number;
 
   // Solo pending (sin emisor todavía: requiere queue management)
   priority?: Priority;
@@ -206,6 +217,12 @@ export interface WaitForAgentsAgentResult {
   last_message: string | null;
   duration_ms: number;
   tokens_used: number;
+  /**
+   * Costo billable acumulado del agente en USD (`total_cost_usd` del
+   * SDK). El chat caller lo usa para reportar costo al user en el
+   * resumen consolidado, o agregar costos por batch.
+   */
+  cost_usd: number;
   model?: string;
   /**
    * Razón terminal cuando aplica: `user_cancelled`, `ide_restart`,
@@ -337,7 +354,22 @@ export type DashboardEventToExtension =
    * DetailPanelManager del extension host crea el WebviewPanel y le
    * inyecta `window.__claudeOrchestrator.agentId`.
    */
-  | { type: 'request_show_detail'; agentId: string };
+  | { type: 'request_show_detail'; agentId: string }
+  /**
+   * Dispara el comando palette `Claude Orchestrator: Test Agent` desde
+   * la UI. Lo emite el botón "Run Test Agent" del empty-hint cuando el
+   * dashboard está sin agentes. Atajo de discoverability — equivalente
+   * a Ctrl+Shift+P → "Test Agent" pero un click.
+   */
+  | { type: 'request_run_test_agent' }
+  /**
+   * Dispara el inject de CLAUDE.md desde el toolbar del dashboard.
+   * Modo auto (createIfMissing=false) — solo actualiza CLAUDE.md
+   * existentes en workspace folders + projectsRoot. Para crear nuevos,
+   * el comando palette `Inject MCP directive into workspaces` ofrece la
+   * variante con creación.
+   */
+  | { type: 'request_inject_claude_md' };
 
 // === Entidades para los scanners (filesystem-derived) ===
 

@@ -17,7 +17,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatElapsed, formatRelative, formatTokens } from '../format';
+import { formatCostUsd, formatElapsed, formatRelative, formatTokens } from '../format';
 
 // =====================================================================
 // === formatElapsed ===================================================
@@ -143,5 +143,38 @@ describe('formatTokens', () => {
     expect(formatTokens(Number.NaN)).toBe('—');
     expect(formatTokens(-100)).toBe('—');
     expect(formatTokens(Number.POSITIVE_INFINITY)).toBe('—');
+  });
+});
+
+// =====================================================================
+// === formatCostUsd ===================================================
+// =====================================================================
+
+describe('formatCostUsd', () => {
+  it('0 → "$0.00" (caso identidad)', () => {
+    expect(formatCostUsd(0)).toBe('$0.00');
+  });
+
+  it('< $0.01 usa 4 decimales (no perder precisión en agentes cortos)', () => {
+    expect(formatCostUsd(0.0023)).toBe('$0.0023');
+    expect(formatCostUsd(0.0001)).toBe('$0.0001');
+  });
+
+  it('$0.01 .. $1 usa 3 decimales (legible para batches chicos)', () => {
+    expect(formatCostUsd(0.157)).toBe('$0.157');
+    expect(formatCostUsd(0.5)).toBe('$0.500');
+  });
+
+  it('>= $1 usa 2 decimales (formato dinero estándar)', () => {
+    expect(formatCostUsd(1.42)).toBe('$1.42');
+    expect(formatCostUsd(12.5)).toBe('$12.50');
+    expect(formatCostUsd(100)).toBe('$100.00');
+  });
+
+  it('undefined / NaN / negativo / Infinity → "—"', () => {
+    expect(formatCostUsd(undefined)).toBe('—');
+    expect(formatCostUsd(Number.NaN)).toBe('—');
+    expect(formatCostUsd(-0.5)).toBe('—');
+    expect(formatCostUsd(Number.POSITIVE_INFINITY)).toBe('—');
   });
 });

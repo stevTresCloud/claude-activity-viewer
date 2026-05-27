@@ -23,7 +23,7 @@ import { useAgentsStore } from '../stores/useAgentsStore';
 import { useDetailMode } from '../composables/useDetailMode';
 import { useNow } from '../composables/useNow';
 import { postToExtension } from '../composables/usePostToExtension';
-import { formatElapsed } from '../utils/format';
+import { formatCostUsd, formatElapsed, formatTokens } from '../utils/format';
 import StatusDot from '../components/atoms/StatusDot.vue';
 import ModelBadge from '../components/atoms/ModelBadge.vue';
 import LogStream from '../components/detail/LogStream.vue';
@@ -124,6 +124,13 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
         <span v-if="agent.task" class="meta-chip">{{ agent.task }}</span>
         <span v-if="agent.branch" class="meta-chip mono">{{ agent.branch }}</span>
         <span class="status-chip" :class="`status-${agent.status}`">{{ agent.status }}</span>
+        <span v-if="agent.tokensUsed" class="meta-chip">
+          <i class="codicon codicon-symbol-numeric" />
+          {{ formatTokens(agent.tokensUsed) }} tokens
+        </span>
+        <span v-if="agent.costUsd !== undefined && agent.costUsd > 0" class="meta-chip cost">
+          {{ formatCostUsd(agent.costUsd) }}
+        </span>
       </div>
     </header>
 
@@ -234,6 +241,17 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
 }
 .meta-chip.mono {
   font-family: var(--font-mono);
+}
+.meta-chip.cost {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--foreground);
+}
+.meta-chip .codicon {
+  font-size: 11px;
+  vertical-align: -1px;
+  opacity: 0.7;
+  margin-right: 2px;
 }
 .status-chip {
   font-size: 10.5px;

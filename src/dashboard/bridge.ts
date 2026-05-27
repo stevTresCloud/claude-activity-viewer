@@ -824,6 +824,7 @@ export class DashboardBridge {
           last_message: null,
           duration_ms: 0,
           tokens_used: 0,
+          cost_usd: 0,
           reason: 'not_found',
         });
         continue;
@@ -837,6 +838,7 @@ export class DashboardBridge {
           last_message: stored.lastAssistantMessage ?? null,
           duration_ms: snap.durationMs ?? 0,
           tokens_used: snap.tokensUsed ?? 0,
+          cost_usd: snap.costUsd ?? 0,
           model: snap.model,
           reason: snap.reason,
         });
@@ -880,6 +882,7 @@ export class DashboardBridge {
     let lastTokensUsed = 0;
     let lastContextTokens = 0;
     let lastContextPct = 0;
+    let lastCostUsd = 0;
 
     try {
       const result = await this.runner.startAgent({
@@ -962,10 +965,18 @@ export class DashboardBridge {
               100,
               Math.round((lastContextTokens / CONTEXT_WINDOW_TOKENS) * 100),
             );
+            // `costUsd` solo viene en el `result` final del SDK
+            // (event.costUsd=0 en usage parciales del turn). Solo
+            // pisamos cuando llega un valor > 0; el último update lo
+            // hace el AgentResult abajo.
+            if (event.costUsd > 0) {
+              lastCostUsd = event.costUsd;
+            }
             this.emitStatusChange(agentId, 'running', {
               tokensUsed: lastTokensUsed,
               contextTokens: lastContextTokens,
               contextUsedPct: lastContextPct,
+              costUsd: lastCostUsd,
             });
             return;
           }
@@ -1011,6 +1022,11 @@ export class DashboardBridge {
         stored.snapshot.contextUsedPct = lastContextPct;
         stored.snapshot.currentTool = lastTool;
         stored.snapshot.subtitle = lastSubtitle;
+        // result.costUsd es la fuente autoritativa (viene del SDK
+        // `total_cost_usd`). Usamos el del result si el último usage
+        // event no llegó con costo no-cero (puede pasar si el agente
+        // termina antes de emitir el result final del turn).
+        stored.snapshot.costUsd = result.costUsd || lastCostUsd;
         // Si el cap defensivo ya seteó reason='max_runtime_exceeded'
         // antes del cancel, NO pisamos con el finalResponse del runner
         // (que en cancel queda como "User cancelled").

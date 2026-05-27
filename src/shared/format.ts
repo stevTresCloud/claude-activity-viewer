@@ -107,6 +107,34 @@ export function formatTokens(n: number | undefined): string {
   return Number.isInteger(rounded) ? `${rounded}k` : `${rounded.toFixed(1)}k`;
 }
 
+// === Cost USD ===
+
+/**
+ * formatCostUsd — número en USD (puede ser fraccional pequeño) → string
+ * con prefijo `$` y precisión adaptativa según magnitud. Pensado para
+ * cards del dashboard y consolidados del chat.
+ *
+ * Adaptación de precisión:
+ *   - < $0.01 → 4 decimales para no perder "$0.0023" como "$0.00".
+ *   - < $1    → 3 decimales (legible para batches chicos).
+ *   - >= $1   → 2 decimales (formato dinero estándar).
+ *
+ * Ejemplos:
+ *   formatCostUsd(0)         → "$0.00"
+ *   formatCostUsd(0.0023)    → "$0.0023"
+ *   formatCostUsd(0.157)     → "$0.157"
+ *   formatCostUsd(1.42)      → "$1.42"
+ *   formatCostUsd(12.5)      → "$12.50"
+ *   formatCostUsd(undefined) → "—"
+ */
+export function formatCostUsd(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n) || n < 0) return '—';
+  if (n === 0) return '$0.00';
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 // === Strings ===
 
 /**

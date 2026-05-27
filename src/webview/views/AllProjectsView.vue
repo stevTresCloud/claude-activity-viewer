@@ -37,8 +37,25 @@ import ProjectGroupHeader from '../components/sections/ProjectGroupHeader.vue';
 import AgentCardRunning from '../components/cards/AgentCardRunning.vue';
 import AgentCardPending from '../components/cards/AgentCardPending.vue';
 import AgentCardRecent from '../components/cards/AgentCardRecent.vue';
+import { postToExtension } from '../composables/usePostToExtension';
 
 const store = useAgentsStore();
+
+// === Discoverability hint cuando dashboard está vacío ===
+//
+// El hint aparece al fondo cuando totalCount=0 (primer install o
+// recién después de un Rescan que limpió RECENT). Antes mostrábamos
+// un empty-state global que reemplazaba las 3 secciones; ahora las
+// secciones se ven siempre y el hint queda discreto al final. El
+// botón "Run Test Agent" dispara el comando palette via postMessage —
+// ahorra un Ctrl+Shift+P a usuarios que recién instalaron y no saben
+// que pueden lanzar un agente local de prueba sin armar un chat.
+
+const isDashboardEmpty = computed(() => store.totalCount === 0);
+
+function runTestAgent(): void {
+  postToExtension({ type: 'request_run_test_agent' });
+}
 
 // === Estado de colapso por sección ===
 //
@@ -178,6 +195,25 @@ const recentGroups = computed(() => groupAgents(store.recent));
         />
       </ProjectGroup>
     </div>
+
+    <!-- ============================================================
+         === Empty hint con CTA ===
+         Solo cuando dashboard está totalmente vacío. Las 3 secciones
+         siguen visibles arriba con counter (0); este bloque ofrece
+         un próximo paso accionable sin obligar al user a buscar el
+         comando palette.
+         ============================================================ -->
+    <div v-if="isDashboardEmpty" class="empty-hint">
+      <p class="empty-hint-title">No agents yet.</p>
+      <p class="empty-hint-msg">
+        Spawn agents from your Claude Code chat with the
+        <code>spawn_agents</code> tool, or run a quick local test:
+      </p>
+      <button class="empty-hint-button" @click="runTestAgent">
+        <i class="codicon codicon-rocket" />
+        Run Test Agent
+      </button>
+    </div>
   </div>
 </template>
 
@@ -199,5 +235,68 @@ const recentGroups = computed(() => groupAgents(store.recent));
   flex-direction: column;
   gap: 8px;
   padding: 8px 12px 12px;
+}
+
+/* ===========================================================
+   === Empty hint con CTA                                  ===
+   Aparece al final cuando totalCount=0. Diseño minimal:
+   título + mensaje pequeño + botón claro. NO compite
+   visualmente con las secciones del kanban (más arriba).    ===
+   =========================================================== */
+.empty-hint {
+  padding: 24px 16px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.empty-hint-title {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.empty-hint-msg {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--foreground-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.empty-hint-msg code {
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  background: var(--background-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.empty-hint-button {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  margin-top: 8px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  background: var(--button-background, var(--vscode-button-background));
+  color: var(--button-foreground, var(--vscode-button-foreground));
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.empty-hint-button:hover {
+  background: var(--button-hover, var(--vscode-button-hoverBackground));
+}
+
+.empty-hint-button .codicon {
+  font-size: 14px;
 }
 </style>

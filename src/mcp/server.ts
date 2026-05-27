@@ -126,7 +126,16 @@ export class OrchestratorMcpServer {
       {
         title: 'Spawn Agents',
         description:
-          'Spawnea uno o más agentes Claude Code en paralelo y retorna sus IDs inmediatamente. ' +
+          'USE THIS TOOL WHEN the user asks for:\n' +
+          '  - Multiple parallel research / analysis ("lanza 3 agentes", "investiga X en paralelo", "research with sub-agents").\n' +
+          '  - Multi-model orchestration ("uno con opus, otro con sonnet, otro con haiku", "compara modelos").\n' +
+          '  - Batch delegation the user wants off the main chat thread.\n' +
+          '  - Long-running work (>30s) that would block your turn or burn the chat context window.\n\n' +
+          'DO NOT use Bash run_in_background or the Task tool for these cases. This tool is the ' +
+          'dedicated orchestrator with a visible kanban dashboard, real cancel, per-agent model ' +
+          'selection, and a long-poll fan-in via wait_for_agents — none of which Bash/Task provide.\n\n' +
+          'PAIR WITH wait_for_agents after spawning to consolidate results back into the chat.\n\n' +
+          'MECHANICS: spawnea uno o más agentes Claude Code en paralelo y retorna sus IDs inmediatamente. ' +
           'Los agentes corren en background con el toolset preset claude_code (Read/Edit/Bash/Grep/etc.) ' +
           'y herencia de skills + memoria del usuario (~/.claude/). ' +
           'Observación del progreso vía el dashboard del plugin (sidebar VS Code).\n\n' +
@@ -358,10 +367,18 @@ export class OrchestratorMcpServer {
       {
         title: 'Wait for agents',
         description:
-          'Bloquea hasta que todos los agent_ids alcancen estado terminal (done/failed/cancelled) ' +
-          'o venza timeout_sec (default 300s, max 1200s). Devuelve `results` para terminados + ' +
-          '`pending` para los que siguen corriendo (con `last_message_partial` y `suspected_stuck`). ' +
-          '\n\nPATRÓN RETRY: si `timed_out: true` y `pending` tiene items, re-llamar la tool con ' +
+          'USE THIS TOOL after spawn_agents to block until parallel sub-agents finish and ' +
+          'return consolidated results to the chat. This is the fan-in step of the orchestration ' +
+          'pattern: spawn_agents kicks N agents in parallel, wait_for_agents blocks until they ' +
+          'all terminate (or timeout) and you summarize their `last_message` back to the user.\n\n' +
+          'DO NOT poll list_agents or get_agent_log in a loop to detect completion — that wastes ' +
+          'context window and burns tokens. wait_for_agents is a single long-poll call designed ' +
+          'for this exact pattern.\n\n' +
+          'MECHANICS: bloquea hasta que todos los agent_ids alcancen estado terminal ' +
+          '(done/failed/cancelled) o venza timeout_sec (default 300s, max 1200s). Devuelve ' +
+          '`results` para terminados + `pending` para los que siguen corriendo (con ' +
+          '`last_message_partial` y `suspected_stuck`).\n\n' +
+          'PATRÓN RETRY: si `timed_out: true` y `pending` tiene items, re-llamar la tool con ' +
           'los pending agent_ids para seguir esperando. Repetir hasta que `pending` quede vacío o ' +
           'decidir cancelar con cancel_agent.\n\n' +
           'NOTAS: para tareas ligeras (consulta web, código corto) usar timeout_sec=30-60. Para ' +

@@ -98,6 +98,10 @@ function onRescan(): void {
   }, 5_000);
 }
 
+function onInjectClaudeMd(): void {
+  postToExtension({ type: 'request_inject_claude_md' });
+}
+
 // Cuando llega un evento `projects_from_disk` o `sessions_from_disk`,
 // el store actualiza `lastScanIso`. Observamos eso para apagar el
 // spinner antes del timeout. Usar watch acá evita depender del
@@ -158,6 +162,20 @@ const contextInfo = computed<ContextInfo | null>(() => {
           @click="onRescan"
         >
           <i class="codicon codicon-refresh" />
+        </button>
+        <!-- Inject CLAUDE.md: atajo al re-scan del injector. Útil
+             cuando el user abre un workspace nuevo y quiere asegurar
+             que la directiva está en su CLAUDE.md sin invocar el
+             palette. Modo update-existing-only (no crea archivos
+             nuevos — para eso el palette completo). -->
+        <button
+          type="button"
+          class="toolbar-btn"
+          aria-label="Inject MCP directive into workspace CLAUDE.md"
+          title="Inject MCP directive into workspace CLAUDE.md (updates existing files only)"
+          @click="onInjectClaudeMd"
+        >
+          <i class="codicon codicon-rocket" />
         </button>
         <button type="button" class="toolbar-btn" aria-label="filter">
           <i class="codicon codicon-filter" />

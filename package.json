@@ -2,14 +2,37 @@
   "name": "claude-orchestrator",
   "displayName": "Claude Orchestrator",
   "description": "VS Code extension to orchestrate multiple Claude Code agents in parallel via embedded MCP server + observable kanban dashboard.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "MIT",
+  "publisher": "stevTresCloud",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stevTresCloud/claude-orchestrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stevTresCloud/claude-orchestrator/issues"
+  },
+  "homepage": "https://github.com/stevTresCloud/claude-orchestrator#readme",
+  "keywords": [
+    "claude",
+    "anthropic",
+    "mcp",
+    "agents",
+    "orchestration",
+    "dashboard",
+    "ai",
+    "automation",
+    "kanban",
+    "sub-agents"
+  ],
   "engines": {
     "vscode": "^1.120.0",
     "node": ">=22"
   },
   "categories": [
-    "Other"
+    "Other",
+    "AI",
+    "Visualization"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -36,6 +59,14 @@
       {
         "command": "claudeOrchestrator.focusDashboard",
         "title": "Claude Orchestrator: Focus dashboard"
+      },
+      {
+        "command": "claudeOrchestrator.registerMcp",
+        "title": "Claude Orchestrator: Register MCP in Claude Code"
+      },
+      {
+        "command": "claudeOrchestrator.injectClaudeMd",
+        "title": "Claude Orchestrator: Inject MCP directive into workspaces"
       }
     ],
     "viewsContainers": {
@@ -110,6 +141,16 @@
           "default": 60,
           "minimum": 5,
           "description": "Si un agente running no emite ningún evento durante N segundos, wait_for_agents lo marca con suspected_stuck=true en la respuesta (NO lo cancela — el chat decide). Subí este número si tus tareas legítimamente quedan en silencio más tiempo entre eventos (Read de archivos grandes, Bash silenciosos). Default: 60s."
+        },
+        "claudeOrchestrator.autoRegisterMcp": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), the extension writes its MCP server entry directly into ~/.claude.json on activation, so the user does not need to run `claude mcp add-json` manually. Set to false to opt out and use the manual setup command printed to the output channel."
+        },
+        "claudeOrchestrator.autoInjectClaudeMd": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), the extension injects a marked section into every CLAUDE.md it finds in the direct subfolders of `claudeOrchestrator.projectsRoot`. The section tells the chat caller to prefer `spawn_agents` over Bash/Task for this workspace, making natural-language prompts ('lanza 3 agentes paralelos') work without explicit tool naming. Only updates existing CLAUDE.md files — never creates new ones automatically (use the `Inject MCP directive into workspaces` palette command for that)."
         },
         "claudeOrchestrator.resumeIn": {
           "type": "string",

@@ -3,6 +3,12 @@ import * as vscode from 'vscode';
 import { registerTestAgentCommands } from './commands/test-agent';
 import { AgentRunner } from './runtime/agent-runner';
 import { OrchestratorHttpServer } from './mcp/http-transport';
+import { registerInClaudeCodeConfig } from './mcp/auto-register';
+import {
+  injectIntoClaudeMdFile,
+  injectAuto,
+  type InjectFileResult,
+} from './mcp/claude-md-injector';
 import { DashboardViewProvider } from './views/dashboard';
 import { DetailPanelManager } from './views/detail-panel';
 import { DashboardBridge } from './dashboard/bridge';
@@ -13,14 +19,16 @@ import type { DashboardEventToExtension } from './shared/dashboard-protocol';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
-// de ~/.claude/mcp.json del user.
+// de ~/.claude.json del user.
 const MCP_SERVER_NAME = 'claude-orchestrator';
-const MCP_SERVER_VERSION = '0.0.1';
+const MCP_SERVER_VERSION = '0.1.0';
+const MCP_PORT = 39127;
 
 // Clave usada en VS Code Secret Storage para persistir el bearer token del
 // MCP server entre arranques. La API `context.secrets` es per-extensión y
 // encripta en disco usando el keystore del SO.
 const MCP_TOKEN_SECRET_KEY = 'mcp.bearerToken';
+const FIRST_AUTO_REGISTER_TOAST_KEY = 'mcp.autoRegisterToastShown';
 
 /**
  * Punto de entrada de la extensión Claude Orchestrator.
@@ -79,19 +87,263 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
   }
 
-  // Mostramos el comando exacto que el user debe pegar en su terminal
-  // para registrar el server en Claude Code. Usamos `add-json` en vez de
-  // `add` porque el `--header` de `claude mcp add` es variadic y se traga
-  // los argumentos posicionales (`name`, `url`) como header values más,
-  // dejando el comando inválido. `add-json` recibe un solo JSON literal
-  // y evita ese problema de parsing.
+  // === Auto-registro en el config de Claude Code CLI (~/.claude.json) ===
+  // Sin esto, el user tendría que copiar el `claude mcp add-json` del
+  // OutputChannel y pegarlo en una terminal externa — fricción real que
+  // mata adopción. El helper hace el merge directo, idempotente, atómico,
+  // preservando otros MCP servers. Opt-out via setting autoRegisterMcp.
+  // Si el config no existe (Claude Code CLI no instalado) o el merge falla,
+  // caemos al flow manual (imprimir el comando) sin romper la activación.
+  const autoRegister = vscode.workspace
+    .getConfiguration('claudeOrchestrator')
+    .get<boolean>('autoRegisterMcp', true);
+
+  const runAutoRegister = async (
+    quiet: boolean,
+  ): Promise<'registered' | 'unchanged' | 'skipped' | 'error'> => {
+    const result = await registerInClaudeCodeConfig(bearerToken!, MCP_PORT);
+    if (result.status === 'registered') {
+      channel.appendLine(
+        '[mcp] auto-registered claude-orchestrator in ~/.claude.json (Claude Code config).',
+      );
+      const alreadyToasted = context.globalState.get<boolean>(
+        FIRST_AUTO_REGISTER_TOAST_KEY,
+        false,
+      );
+      if (!quiet && !alreadyToasted) {
+        void vscode.window.showInformationMessage(
+          'Claude Orchestrator: MCP server registered in Claude Code automatically.',
+        );
+        await context.globalState.update(FIRST_AUTO_REGISTER_TOAST_KEY, true);
+      } else if (!quiet) {
+        void vscode.window.showInformationMessage(
+          'Claude Orchestrator: MCP server re-registered in Claude Code.',
+        );
+      }
+      return 'registered';
+    }
+    if (result.status === 'unchanged') {
+      channel.appendLine(
+        '[mcp] auto-register no-op: entry already up to date in ~/.claude.json.',
+      );
+      if (!quiet) {
+        void vscode.window.showInformationMessage(
+          'Claude Orchestrator: MCP server already registered in Claude Code (unchanged).',
+        );
+      }
+      return 'unchanged';
+    }
+    if (result.status === 'skipped') {
+      channel.appendLine(
+        '[mcp] auto-register skipped: ~/.claude.json not found (Claude Code CLI may not be installed).',
+      );
+      if (!quiet) {
+        void vscode.window.showWarningMessage(
+          'Claude Orchestrator: cannot find ~/.claude.json — install the Claude Code CLI first, then re-run "Register MCP in Claude Code".',
+        );
+      }
+      return 'skipped';
+    }
+    channel.appendLine(`[mcp] !!! auto-register failed: ${result.message}`);
+    if (!quiet) {
+      void vscode.window.showErrorMessage(
+        `Claude Orchestrator: auto-register failed (${result.message}). Use the manual claude mcp add-json command from the output channel.`,
+      );
+    }
+    return 'error';
+  };
+
+  if (autoRegister) {
+    void runAutoRegister(true);
+  } else {
+    channel.appendLine(
+      '[mcp] auto-register disabled by claudeOrchestrator.autoRegisterMcp=false.',
+    );
+  }
+
+  // Comando palette para re-registrar manualmente (útil si el user borró
+  // ~/.claude.json, rotó el token, o tenía autoRegisterMcp=false).
+  const registerMcpCmd = vscode.commands.registerCommand(
+    'claudeOrchestrator.registerMcp',
+    () => void runAutoRegister(false),
+  );
+  context.subscriptions.push(registerMcpCmd);
+
+  // === Auto-inyección de directiva en CLAUDE.md de workspaces ===
+  // Sin esto el chat caller invoca spawn_agents ~80% del tiempo (depende
+  // del modelo). Con la sección embebida en el CLAUDE.md de cada
+  // workspace bajo projectsRoot, el modelo lo lee como contexto del
+  // proyecto y la elección se vuelve determinista. Solo updatea
+  // CLAUDE.md ya existentes (modo auto); creación explícita via comando
+  // palette.
+
+  const summarizeInjection = (results: InjectFileResult[]): string => {
+    const tally: Record<string, number> = {};
+    for (const r of results) tally[r.status] = (tally[r.status] ?? 0) + 1;
+    const parts: string[] = [];
+    for (const k of ['updated', 'created', 'unchanged', 'skipped', 'error']) {
+      if (tally[k]) parts.push(`${tally[k]} ${k}`);
+    }
+    return parts.join(', ') || 'no files matched';
+  };
+
+  const runAutoInject = async (
+    createIfMissing: boolean,
+    quiet: boolean,
+  ): Promise<void> => {
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const projectsRoot = cfg.get<string[]>('projectsRoot', []);
+    // Workspace folders activos de VS Code. Es la fuente MÁS importante:
+    // típicamente el user abre el repo raíz (ej. ~/git19) y el CLAUDE.md
+    // vive ahí, no en subdirectorios del projectsRoot. Sin esto el
+    // injector falla silenciosamente cuando projectsRoot apunta a un
+    // padre genérico (`~/git19/docs`) cuyos subdirs no tienen CLAUDE.md
+    // propios.
+    const workspaceFolders = (vscode.workspace.workspaceFolders ?? []).map(
+      (f) => f.uri.fsPath,
+    );
+    if (projectsRoot.length === 0 && workspaceFolders.length === 0) {
+      if (!quiet) {
+        void vscode.window.showInformationMessage(
+          'Claude Orchestrator: no projectsRoot configured and no workspace open. Add absolute paths in settings or open a workspace first.',
+        );
+      }
+      channel.appendLine(
+        '[claude-md] auto-inject skipped: no projectsRoot configured and no workspace folder open.',
+      );
+      return;
+    }
+    const summary = await injectAuto(projectsRoot, workspaceFolders, {
+      createIfMissing,
+    });
+    const summaryStr = summarizeInjection(summary.results);
+    channel.appendLine(
+      `[claude-md] scanned ${summary.scannedRoots.length} root(s) (workspace folders + projectsRoot subdirs); ${summaryStr}.`,
+    );
+    for (const r of summary.results) {
+      if (r.status === 'error') {
+        channel.appendLine(`[claude-md] !!! ${r.path}: ${r.reason}`);
+      } else if (r.status === 'updated' || r.status === 'created') {
+        channel.appendLine(`[claude-md] ${r.status}: ${r.path}`);
+      }
+    }
+    if (!quiet) {
+      const touched = summary.results.filter(
+        (r) => r.status === 'updated' || r.status === 'created',
+      );
+      if (touched.length === 0) {
+        void vscode.window.showInformationMessage(
+          'Claude Orchestrator: no CLAUDE.md files needed updating (already up to date or none found in workspace folders / projectsRoot).',
+        );
+      } else if (touched.length <= 3) {
+        // Pocas rutas → caben inline en el toast. Nombre relativo al
+        // home para que no se vea ruidoso con paths absolutos largos.
+        const pretty = touched
+          .map((r) => relativizeToHome(r.path))
+          .join(', ');
+        void vscode.window.showInformationMessage(
+          `Claude Orchestrator: ${touched.length} CLAUDE.md file${touched.length === 1 ? '' : 's'} updated: ${pretty}`,
+        );
+      } else {
+        // Muchas rutas → resumen + "Show details" que enfoca el output
+        // channel donde cada path quedó loggeada arriba.
+        const message = `Claude Orchestrator: ${touched.length} CLAUDE.md files updated.`;
+        const action = await vscode.window.showInformationMessage(
+          message,
+          'Show details',
+        );
+        if (action === 'Show details') {
+          channel.show(true);
+        }
+      }
+    }
+  };
+
+  // Helper local: convierte `/home/me/foo/bar` → `~/foo/bar` para
+  // mostrar paths en el toast sin desperdiciar espacio. Solo cosmético
+  // para humanos; el output channel mantiene el path absoluto.
+  function relativizeToHome(p: string): string {
+    const home = process.env.HOME ?? '';
+    if (home && p.startsWith(home + '/')) {
+      return '~' + p.slice(home.length);
+    }
+    return p;
+  }
+
+  const autoInject = vscode.workspace
+    .getConfiguration('claudeOrchestrator')
+    .get<boolean>('autoInjectClaudeMd', true);
+  if (autoInject) {
+    void runAutoInject(false, true);
+  } else {
+    channel.appendLine(
+      '[claude-md] auto-inject disabled by claudeOrchestrator.autoInjectClaudeMd=false.',
+    );
+  }
+
+  // Re-inject cuando `projectsRoot` cambia (user agrega/quita paths) o
+  // cuando `autoInjectClaudeMd` flippa a true. NO re-inyecta cuando
+  // autoInjectClaudeMd flippa a false (no destructivo — la sección
+  // existente queda hasta que el user la borre manualmente).
+  const settingsListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (
+      event.affectsConfiguration('claudeOrchestrator.projectsRoot') ||
+      event.affectsConfiguration('claudeOrchestrator.autoInjectClaudeMd')
+    ) {
+      const stillAuto = vscode.workspace
+        .getConfiguration('claudeOrchestrator')
+        .get<boolean>('autoInjectClaudeMd', true);
+      if (stillAuto) {
+        void runAutoInject(false, true);
+      }
+    }
+  });
+  context.subscriptions.push(settingsListener);
+
+  // Comando palette manual. Pregunta si crear CLAUDE.md faltantes —
+  // sin opciones del workspace activo, escanea projectsRoot completo.
+  const injectClaudeMdCmd = vscode.commands.registerCommand(
+    'claudeOrchestrator.injectClaudeMd',
+    async () => {
+      const pick = await vscode.window.showQuickPick(
+        [
+          {
+            label: 'Update existing CLAUDE.md only',
+            description: 'Skip subdirectories that do not have CLAUDE.md',
+            value: false,
+          },
+          {
+            label: 'Update existing + create missing',
+            description: 'Create CLAUDE.md in every direct subfolder of projectsRoot',
+            value: true,
+          },
+        ],
+        {
+          title: 'Inject MCP directive into workspaces',
+          placeHolder: 'How to handle subdirectories without CLAUDE.md?',
+        },
+      );
+      if (!pick) return;
+      await runAutoInject(pick.value, false);
+    },
+  );
+  context.subscriptions.push(injectClaudeMdCmd);
+
+  // Helper exportado por el comando para inyectar en un archivo
+  // específico (no usado hoy por la UI pero queda disponible si el
+  // futuro detail panel quiere ofrecer "inject here" por workspace).
+  void injectIntoClaudeMdFile;
+
+  // Fallback manual: el comando exacto siempre va al output channel. Si
+  // el auto-register falla por cualquier razón (config ausente, parse
+  // error, perms), el user todavía puede copiar y pegar.
   const mcpAddJsonPayload = JSON.stringify({
     type: 'http',
-    url: 'http://127.0.0.1:39127/mcp',
+    url: `http://127.0.0.1:${MCP_PORT}/mcp`,
     headers: { Authorization: `Bearer ${bearerToken}` },
   });
   channel.appendLine(
-    '[mcp] register in Claude Code (run once per machine):\n' +
+    '[mcp] manual setup fallback (if auto-register did not run):\n' +
       `       claude mcp add-json --scope user claude-orchestrator '${mcpAddJsonPayload}'`,
   );
 
@@ -207,6 +459,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const meta = bridge.getResumeTarget(msg.agentId);
       const name = meta?.name ?? msg.agentId.slice(0, 8);
       detailPanel.showForAgent(msg.agentId, name);
+      return;
+    }
+    if (msg.type === 'request_run_test_agent') {
+      void vscode.commands.executeCommand('claudeOrchestrator.testAgent');
+      return;
+    }
+    if (msg.type === 'request_inject_claude_md') {
+      // Atajo del botón del toolbar: ejecuta auto-inject sin prompt
+      // (createIfMissing=false). Para crear archivos faltantes el user
+      // tiene el comando palette completo con QuickPick.
+      void runAutoInject(false, false);
       return;
     }
     scanner.handleMessage(msg);

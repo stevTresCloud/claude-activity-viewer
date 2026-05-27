@@ -15,4 +15,5 @@ export {
   formatElapsed,
   formatRelative,
   formatTokens,
+  formatCostUsd,
 } from '../../shared/format';
