@@ -205,16 +205,11 @@ export class AgentRunner {
               const incOut = msgUsage.output_tokens ?? 0;
               if (incIn > 0 || incOut > 0) {
                 config.onEvent({
-                  type: 'usage',
+                  type: 'usage_turn',
                   inputTokens: incIn,
                   outputTokens: incOut,
                   cacheReadTokens: msgUsage.cache_read_input_tokens ?? 0,
                   cacheCreationTokens: msgUsage.cache_creation_input_tokens ?? 0,
-                  // El costo total solo viene en el `result` final
-                  // (calculado por el SDK con tarifas vigentes). Mid-run
-                  // dejamos 0; el último `usage` que emite el result lo
-                  // sobreescribe con el valor real.
-                  costUsd: 0,
                 });
               }
             }
@@ -268,8 +263,13 @@ export class AgentRunner {
               cacheCreationTokens = usage.cache_creation_input_tokens ?? cacheCreationTokens;
               costUsd = event.total_cost_usd;
             }
+            // Acumulados a través de TODOS los turnos del agente — el
+            // bridge usa este evento SOLO para fijar el costUsd y los
+            // tokens billables finales. Pisar contextTokens con estos
+            // valores rompía el ContextBar al cierre (ver
+            // V0_1_0_FIELD_REPORT.md: contextTokens reportado en 10.9M).
             config.onEvent({
-              type: 'usage',
+              type: 'usage_final',
               inputTokens,
               outputTokens,
               cacheReadTokens,

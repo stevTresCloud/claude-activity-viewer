@@ -128,8 +128,16 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
           <i class="codicon codicon-symbol-numeric" />
           {{ formatTokens(agent.tokensUsed) }} tokens
         </span>
-        <span v-if="agent.costUsd !== undefined && agent.costUsd > 0" class="meta-chip cost">
-          {{ formatCostUsd(agent.costUsd) }}
+        <!-- El chip de costo siempre se muestra: mid-run el SDK no
+             expone total_cost_usd hasta el `result` final, así que
+             formatCostUsd(_, status) devuelve "computing…" en running
+             en lugar de "$0.00" engañoso. Para terminados normales
+             mostramos el valor o "$0.00" si literalmente fue cero. -->
+        <span
+          class="meta-chip cost"
+          :class="{ pending: agent.status === 'running' && !agent.costUsd }"
+        >
+          {{ formatCostUsd(agent.costUsd, agent.status) }}
         </span>
       </div>
     </header>
@@ -246,6 +254,13 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
   color: var(--foreground);
+}
+/* Estado "computing…" mid-run: italic dim para distinguirlo visualmente
+ * de un valor real (ej. "$0.00" terminal). */
+.meta-chip.cost.pending {
+  font-style: italic;
+  font-weight: 400;
+  opacity: 0.7;
 }
 .meta-chip .codicon {
   font-size: 11px;

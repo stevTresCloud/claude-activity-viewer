@@ -31,6 +31,16 @@ import * as vscode from 'vscode';
 export interface WebviewBootConfig {
   mode: 'sidebar' | 'detail';
   agentId?: string | null;
+  /**
+   * Feature flags resueltos al momento de construir el HTML. Permiten
+   * gatear UI sin un canal "settings_changed" — el costo es que cambios
+   * post-load requieren reload del webview, lo cual VS Code hace solo
+   * al cerrar+abrir el sidebar.
+   */
+  flags?: {
+    /** `claudeOrchestrator.showTransportState`. Default false. */
+    showTransportState?: boolean;
+  };
 }
 
 export interface BuildWebviewHtmlOptions {

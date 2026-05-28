@@ -27,6 +27,7 @@ import {
   type AgentSnapshot,
   type AgentStatus,
   type LogEntry,
+  type TransportState,
 } from '../../shared/dashboard-protocol';
 import { useNow } from '../composables/useNow';
 
@@ -49,6 +50,15 @@ export const useAgentsStore = defineStore('agents', () => {
    * llega más adelante); persistimos para tenerlo listo.
    */
   const logsByAgent = ref<Record<string, LogEntry[]>>({});
+
+  /**
+   * Estado heurístico del transport MCP. El bridge lo emite con
+   * `transport_state_changed` cuando un long-poll de `wait_for_agents`
+   * lleva > 60s sin resolver (probable transport drop). El sidebar usa
+   * esto para gatear un banner — visible solo si el setting
+   * `claudeOrchestrator.showTransportState` está en true.
+   */
+  const transportState = ref<TransportState>('healthy');
 
   // === Actions de mutación (llamadas por useDashboardBridge) ===
 
@@ -121,6 +131,11 @@ export const useAgentsStore = defineStore('agents', () => {
    */
   function replaceLogsForAgent(agentId: string, entries: LogEntry[]): void {
     logsByAgent.value[agentId] = entries.slice();
+  }
+
+  /** Setea el transportState con el último valor que emitió el bridge. */
+  function setTransportState(state: TransportState): void {
+    transportState.value = state;
   }
 
   /**
@@ -324,6 +339,7 @@ export const useAgentsStore = defineStore('agents', () => {
     // state
     agents,
     logsByAgent,
+    transportState,
     // actions
     applyAgentList,
     addAgent,
@@ -331,6 +347,7 @@ export const useAgentsStore = defineStore('agents', () => {
     appendLog,
     replaceLogsForAgent,
     markAgentCompleted,
+    setTransportState,
     // getters
     nowPlaying,
     upNext,

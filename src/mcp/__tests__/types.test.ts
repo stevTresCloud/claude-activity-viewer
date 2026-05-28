@@ -199,6 +199,65 @@ describe('GET_AGENT_LOG_INPUT_SHAPE — args y bounds', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  // === Subtarea E del ticket #0 v0.2: tail_lines + kinds_filter ===
+  it('tail_lines dentro de bounds (1-2000) pasa', () => {
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: 50 }).success,
+    ).toBe(true);
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: 1 }).success,
+    ).toBe(true);
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: 2000 }).success,
+    ).toBe(true);
+  });
+
+  it('rechaza tail_lines fuera de bounds (0 o >2000)', () => {
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: 0 }).success,
+    ).toBe(false);
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: 2001 }).success,
+    ).toBe(false);
+    expect(
+      getAgentLogSchema.safeParse({ agent_id: 'a', tail_lines: -5 }).success,
+    ).toBe(false);
+  });
+
+  it('kinds_filter con enum válido pasa', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'a',
+      kinds_filter: ['text', 'thinking'],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rechaza kinds_filter con valor fuera del enum', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'a',
+      kinds_filter: ['text', 'invented_kind'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rechaza kinds_filter array vacío (sin sentido — el caller debería omitir el campo)', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'a',
+      kinds_filter: [],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('combinación completa: agent_id + since + tail_lines + kinds_filter pasa', () => {
+    const result = getAgentLogSchema.safeParse({
+      agent_id: 'a',
+      since: 1_700_000_000_000,
+      tail_lines: 50,
+      kinds_filter: ['text'],
+    });
+    expect(result.success).toBe(true);
+  });
 });
 
 describe('CANCEL_AGENT_INPUT_SHAPE — args y bounds', () => {

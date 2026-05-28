@@ -74,6 +74,9 @@ export function useDashboardBridge(): void {
       case 'sessions_from_disk':
         scanner.applySessionsFromDisk(data.sessions, data.scannedAtIso);
         break;
+      case 'transport_state_changed':
+        agents.setTransportState(data.state);
+        break;
       default: {
         // Forward-compat: si el bridge agrega un evento nuevo no
         // declarado en el contrato compartido, lo ignoramos en

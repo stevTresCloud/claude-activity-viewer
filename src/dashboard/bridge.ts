@@ -48,6 +48,7 @@ import {
   type AgentStatus,
   type DashboardEventToWebview,
   type LogEntry,
+  type TransportState,
   type WaitForAgentsAgentPending,
   type WaitForAgentsAgentResult,
   type WaitForAgentsResult,
@@ -60,6 +61,45 @@ const STATE_KEY = 'claudeOrchestrator.agents';
 // del webview lo respetan en paralelo (importan desde el mismo lugar).
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;       // 30 días
 const PERSIST_DEBOUNCE_MS = 500;
+/**
+ * Idempotency cache de `wait_for_agents`: si una segunda call llega con
+ * el mismo set de `agentIds` mientras el primer waiter sigue activo, se
+ * suscribe a la MISMA Promise (fan-in) en vez de crear un waiter nuevo.
+ *
+ * Caso de uso: el transport MCP tira mid-call (issue conocido en
+ * claude-code 2.1.x con long-polls; ver V0_1_0_FIELD_REPORT.md). El
+ * modelo re-invoca con los mismos ids y recoge el waiter en lugar de
+ * reiniciarlo desde cero.
+ *
+ * TTL = 30 min: cap arriba del max timeout_sec (1200s = 20 min). Si por
+ * algún motivo el waiter nunca resuelve, el TTL evita leak del map.
+ * Cache size LRU = 32: límite defensivo contra crecimiento patológico
+ * en sesiones muy largas (eviction FIFO del más viejo).
+ */
+const WAITER_TTL_MS = 30 * 60 * 1000;
+const WAITER_CACHE_MAX = 32;
+/**
+ * Umbral del transport degraded: si un `wait_for_agents` lleva más de
+ * esto sin resolver, sospechamos que el transport HTTP cayó (los
+ * agentes pueden seguir corriendo bien — el bridge no los pierde —
+ * pero el chat caller nunca recibió la respuesta del long-poll).
+ *
+ * 60s es el techo observado en el field report v0.1.0: los 3 drops
+ * documentados ocurrieron < 60s desde spawn. Sobre los waiters legítimos
+ * tendría que ser configurable; por ahora hardcoded — la UI gates con
+ * setting opt-in (`claudeOrchestrator.showTransportState`).
+ */
+const TRANSPORT_DEGRADED_THRESHOLD_MS = 60 * 1000;
+
+/**
+ * Key estable para el idempotency cache: orden no importa al chat caller
+ * (mismo set de agent_ids = misma intent), así que ordenamos y juntamos.
+ * UUIDs tienen ~122 bits de entropía — la chance de colisión es nula sin
+ * hashing extra. Si en v0.3 cambia el formato del id (p. ej. ULID), revisar.
+ */
+function waiterKey(agentIds: string[]): string {
+  return [...agentIds].sort().join(',');
+}
 /**
  * Ventana de contexto efectiva en tokens. Claude 4 hoy reporta
  * 200k de contexto público. Usado para derivar contextUsedPct =
@@ -149,6 +189,18 @@ export interface SpawnInput {
 export interface SpawnOutput {
   agentId: string;
   finished: Promise<void>;
+}
+
+/**
+ * Entry del idempotency cache de `wait_for_agents`. Una invocación en vuelo
+ * que múltiples calls pueden compartir (fan-in) cuando llegan con el mismo
+ * set de agent_ids dentro del TTL.
+ */
+interface SharedWaiter {
+  /** Promise de la respuesta consolidada. Suscribirse = await en este field. */
+  promise: Promise<WaitForAgentsResult>;
+  /** Epoch ms al crear el waiter. Suma con `WAITER_TTL_MS` da el deadline. */
+  createdAt: number;
 }
 
 /**
@@ -260,6 +312,23 @@ export class DashboardBridge {
   // y llama bridge.cancel. El bloque terminal del run() respeta el
   // reason ya seteado (no lo pisa con el finalResponse del runner).
   private readonly maxRuntimeTimers = new Map<string, NodeJS.Timeout>();
+
+  // Idempotency cache de wait_for_agents: misma key (agentIds sorted) →
+  // mismo Promise (fan-in). Sobrevive transport drops mid-call: el modelo
+  // re-invoca con los mismos ids y se suscribe al waiter existente.
+  // Insertion-order del Map = FIFO para LRU eviction al pasar el cap.
+  private readonly waiterCache = new Map<string, SharedWaiter>();
+
+  // Tracking del heurístico transport-degraded por waiter. Una sola
+  // estructura encoda los dos estados posibles de un waiter:
+  //   - value = NodeJS.Timeout: timer aún corriendo, waiter en
+  //     ventana pre-threshold (sano).
+  //   - value = null:            timer ya disparó, waiter post-threshold
+  //     (degraded). updateTransportState lo refleja.
+  // Cleanup en .finally del waiter elimina la entry sea cual sea su
+  // estado, y dispara updateTransportState si la transición lo amerita.
+  private readonly waiterDegradedState = new Map<string, NodeJS.Timeout | null>();
+  private transportState: TransportState = 'healthy';
   // Promises de runs en vuelo. Las trackeamos para que dispose()
   // pueda esperarlas con allSettled antes del flush final — si no
   // las espera, el flush captura el state PRE-terminal de los
@@ -407,6 +476,11 @@ export class DashboardBridge {
     // webviews ya tienen su state y no deben recibir un agent_list
     // que les fuerce un applyAgentList que vacía sus logs.
     webview.postMessage({ type: 'agent_list', agents });
+    // Re-emitimos el estado actual del transport al webview nuevo. El
+    // `transport_state_changed` solo se broadcast en TRANSICIONES; sin
+    // este replay, un sidebar abierto durante un drop arrancaría con
+    // 'healthy' aunque el bridge ya lo había puesto en 'degraded'.
+    webview.postMessage({ type: 'transport_state_changed', state: this.transportState });
     // Notificamos a los suscriptores (scanner-controller) para que
     // re-emitan su último cache al webview. Fire-and-forget; un
     // callback que tire no debe romper attach.
@@ -617,24 +691,41 @@ export class DashboardBridge {
   }
 
   /**
-   * Devuelve el ringbuffer completo de logs del agente o null si
-   * el agentId no existe. Si `since` viene, filtra entries con
-   * `ts > since` (útil para paginación incremental: el MCP client
-   * guarda el `ts` del último entry recibido y pide el delta).
+   * Devuelve el ringbuffer del agente, opcionalmente filtrado/paginado:
+   *   - `since`: solo entries con `ts > since` (paginación incremental).
+   *   - `kindsFilter`: solo entries cuyo `kind` esté en la lista.
+   *   - `tailLines`: solo los últimos N entries POST-filtros.
    *
-   * El consumidor del MCP `get_agent_log` lo usa para devolver
-   * batches al chat externo sin mandar el ringbuffer entero cada
-   * vez.
+   * El orden de aplicación importa: kindsFilter → since → tail. Un caller
+   * que pasa `kindsFilter=['text'] tailLines=50` recibe los últimos 50
+   * `text` (no los últimos 50 entries de los cuales algunos son `text`).
+   *
+   * El consumidor del MCP `get_agent_log` lo usa para devolver batches
+   * al chat externo sin mandar el ringbuffer entero cada vez (un agente
+   * verboso genera 153-462 KB de log; con filtros baja a ~10 KB).
+   *
+   * Devuelve `null` si el agentId no existe.
    */
   getAgentLog(
     agentId: string,
-    since?: number,
+    opts?: {
+      since?: number;
+      kindsFilter?: LogEntry['kind'][];
+      tailLines?: number;
+    },
   ): { entries: LogEntry[] } | null {
     const stored = this.agents.get(agentId);
     if (!stored) return null;
-    let entries = stored.log;
-    if (typeof since === 'number' && Number.isFinite(since)) {
-      entries = entries.filter((e) => e.ts > since);
+    let entries: LogEntry[] = stored.log;
+    if (opts?.kindsFilter && opts.kindsFilter.length > 0) {
+      const allowed = new Set(opts.kindsFilter);
+      entries = entries.filter((e) => allowed.has(e.kind));
+    }
+    if (typeof opts?.since === 'number' && Number.isFinite(opts.since)) {
+      entries = entries.filter((e) => e.ts > opts.since!);
+    }
+    if (typeof opts?.tailLines === 'number' && opts.tailLines > 0) {
+      entries = entries.slice(-opts.tailLines);
     }
     // Shallow copy para evitar que el caller mute el ringbuffer
     // interno (los LogEntry son objetos simples sin nesting).
@@ -746,6 +837,13 @@ export class DashboardBridge {
    * Garantía: el listener se des-registra siempre (resolve y timeout
    * path).
    *
+   * Idempotency: si llega una segunda call con el mismo set de agent_ids
+   * dentro del TTL del waiter (30 min), se suscribe a la MISMA Promise
+   * (fan-in) en lugar de crear un waiter nuevo. Permite recuperar la
+   * espera después de un transport drop mid-call sin reiniciar el
+   * long-poll. Los params (`timeoutMs`, `stuckThresholdMs`) del segundo
+   * call se ignoran — el waiter compartido usa los del PRIMER call.
+   *
    * El patrón retry del chat: cuando recibe `timed_out: true`, re-llama
    * con los `pending` agent_ids. La description del tool MCP explicita
    * este contrato.
@@ -753,16 +851,35 @@ export class DashboardBridge {
    * AgentIds que no existen en el registry → result con
    * `reason: 'not_found'` (no error operacional; estado válido).
    */
-  async waitForAgents(opts: {
+  // Devuelve Promise directo (no async) para preservar la identidad de
+  // referencia del waiter cacheado: con `async` el motor envolvería el
+  // return en una Promise nueva, rompiendo el fan-in (cada caller
+  // recibiría una Promise distinta aunque internamente compartieran
+  // resolución). El test explícito `p1 === p2` lo cubre.
+  waitForAgents(opts: {
     agentIds: string[];
     timeoutMs: number;
     stuckThresholdMs: number;
   }): Promise<WaitForAgentsResult> {
     const { agentIds, timeoutMs, stuckThresholdMs } = opts;
+    const key = waiterKey(agentIds);
+    const now = Date.now();
 
-    // Snapshot inicial: ¿quién está pending? Cualquier status no-terminal
-    // se considera pending (running + pending). Simétrico al check del
-    // helper `buildWaitResult`.
+    // === Fan-in: cache hit dentro del TTL ===
+    const existing = this.waiterCache.get(key);
+    if (existing && now - existing.createdAt < WAITER_TTL_MS) {
+      this.channel.appendLine(
+        `[${ts()}] [bridge] wait_for_agents fan-in key=${key.slice(0, 16)} (idempotency hit; reusing waiter)`,
+      );
+      return existing.promise;
+    }
+    if (existing) {
+      // Entry expirado por TTL — sanea antes de continuar.
+      this.waiterCache.delete(key);
+    }
+
+    // === Cheap path: todos los agent_ids ya terminales (o inexistentes) ===
+    // No vale la pena cachear ni listener — retorno inmediato sin timer.
     const pendingSet = new Set<string>();
     for (const id of agentIds) {
       const stored = this.agents.get(id);
@@ -772,31 +889,118 @@ export class DashboardBridge {
         pendingSet.add(id);
       }
     }
-
-    // Si todos están terminados (o no existen), retorna inmediato sin
-    // timer ni listener. Cheap-path para el caller que pollea.
     if (pendingSet.size === 0) {
-      return this.buildWaitResult(agentIds, stuckThresholdMs, false);
+      return Promise.resolve(this.buildWaitResult(agentIds, stuckThresholdMs, false));
     }
 
-    // Subscribimos al canal de "agente entró en terminal" y restamos
-    // del set conforme lleguen. Si el set queda vacío antes del timer,
-    // resolve inmediato. Si vence el timer, resolve con lo que tenga.
-    const timedOut = await new Promise<boolean>((resolve) => {
+    // === Long-poll con caching ===
+    const promise = this.runWait(agentIds, timeoutMs, stuckThresholdMs, pendingSet);
+
+    // LRU eviction FIFO al pasar el cap: descarta el entry más viejo del
+    // Map (orden de inserción). Defensivo contra sesiones patológicas;
+    // en uso normal el cache nunca supera 1-2 entries.
+    //
+    // Crítico: limpiar `waiterDegradedState[oldestKey]` también. El waiter
+    // evictado puede seguir vivo (otros callers aún lo `await`an), y su
+    // `.finally` correrá eventualmente — sin esta limpieza, ese .finally
+    // borraría/clearTimeoutearía las entries del waiter NUEVO re-cacheado
+    // bajo la misma key, rompiendo el bookkeeping. El `clearTimeout` del
+    // viejo se hace acá para que no dispare el degraded del evictado.
+    if (this.waiterCache.size >= WAITER_CACHE_MAX) {
+      const oldestKey = this.waiterCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.waiterCache.delete(oldestKey);
+        const oldTimer = this.waiterDegradedState.get(oldestKey);
+        if (oldTimer) clearTimeout(oldTimer);
+        if (this.waiterDegradedState.delete(oldestKey)) {
+          this.updateTransportState();
+        }
+      }
+    }
+
+    const waiter: SharedWaiter = { promise, createdAt: now };
+    this.waiterCache.set(key, waiter);
+
+    // Timer del transport degraded: si el waiter sigue activo en T+60s,
+    // el value de la map pasa de Timeout → null (post-threshold) y se
+    // dispara la transición del state global. Cleanup al resolver borra
+    // la entry, vuelva a healthy si era el último degraded vivo.
+    const degradedTimer = setTimeout(() => {
+      this.waiterDegradedState.set(key, null);
+      this.updateTransportState();
+    }, TRANSPORT_DEGRADED_THRESHOLD_MS);
+    degradedTimer.unref?.();
+    this.waiterDegradedState.set(key, degradedTimer);
+
+    // Cleanup al resolver. Guard de identidad: solo limpiamos las
+    // estructuras si la entry en cache todavía es ESTE waiter. Si fue
+    // evictado por LRU y otro waiter ocupó la misma key, su cleanup ya
+    // ocurrió al evictarlo (ver bloque LRU arriba) — re-borrar acá pisaría
+    // las estructuras del waiter sucesor.
+    promise.finally(() => {
+      if (this.waiterCache.get(key) !== waiter) return;
+      this.waiterCache.delete(key);
+      const tracked = this.waiterDegradedState.get(key);
+      if (tracked) clearTimeout(tracked);
+      if (this.waiterDegradedState.delete(key)) {
+        this.updateTransportState();
+      }
+    });
+
+    return promise;
+  }
+
+  /**
+   * Computa el transportState nuevo (`degraded` si hay 1+ waiters cuyo
+   * timer ya disparó — value === null en la map, `healthy` si no) y
+   * emite el evento al webview SI cambió. Es no-op cuando el estado se
+   * mantiene — la UI solo escucha transiciones.
+   */
+  private updateTransportState(): void {
+    let degradedCount = 0;
+    for (const timer of this.waiterDegradedState.values()) {
+      if (timer === null) degradedCount++;
+    }
+    const next: TransportState = degradedCount > 0 ? 'degraded' : 'healthy';
+    if (next === this.transportState) return;
+    this.transportState = next;
+    this.channel.appendLine(
+      `[${ts()}] [bridge] transport_state_changed → ${next} (degradedCount=${degradedCount})`,
+    );
+    this.post({ type: 'transport_state_changed', state: next });
+  }
+
+  /** Estado actual del transport (heurístico). Útil para tests + attach. */
+  getTransportState(): TransportState {
+    return this.transportState;
+  }
+
+  /**
+   * Ejecuta el long-poll event-driven. Helper extraído de `waitForAgents`
+   * para que el flujo de cache (cheap path, fan-in, eviction) quede claro
+   * y el await del listener+timer viva en un solo lugar. Resuelve
+   * directamente con el WaitForAgentsResult en ambos paths (no boolean
+   * intermedio + .then) — menos microtask hops, sin Promise wrapping.
+   */
+  private runWait(
+    agentIds: string[],
+    timeoutMs: number,
+    stuckThresholdMs: number,
+    pendingSet: Set<string>,
+  ): Promise<WaitForAgentsResult> {
+    return new Promise<WaitForAgentsResult>((resolve) => {
       const off = this.onAgentCompleted((event) => {
         if (pendingSet.delete(event.agentId) && pendingSet.size === 0) {
           off();
           clearTimeout(timer);
-          resolve(false);
+          resolve(this.buildWaitResult(agentIds, stuckThresholdMs, false));
         }
       });
       const timer = setTimeout(() => {
         off();
-        resolve(true);
+        resolve(this.buildWaitResult(agentIds, stuckThresholdMs, true));
       }, timeoutMs);
     });
-
-    return this.buildWaitResult(agentIds, stuckThresholdMs, timedOut);
   }
 
   /**
@@ -936,7 +1140,7 @@ export class DashboardBridge {
             return;
           }
 
-          if (event.type === 'usage') {
+          if (event.type === 'usage_turn') {
             // `tokensUsed` (UI badge en RECENT + completion toast)
             // = costo billable del turno = input nuevo + output. NO
             // incluye cache porque cache reads se pagan a tarifa
@@ -965,10 +1169,53 @@ export class DashboardBridge {
               100,
               Math.round((lastContextTokens / CONTEXT_WINDOW_TOKENS) * 100),
             );
-            // `costUsd` solo viene en el `result` final del SDK
-            // (event.costUsd=0 en usage parciales del turn). Solo
-            // pisamos cuando llega un valor > 0; el último update lo
-            // hace el AgentResult abajo.
+            this.emitStatusChange(agentId, 'running', {
+              tokensUsed: lastTokensUsed,
+              contextTokens: lastContextTokens,
+              contextUsedPct: lastContextPct,
+              costUsd: lastCostUsd,
+            });
+            return;
+          }
+
+          if (event.type === 'usage_final') {
+            // `usage_final` trae cumulative tokens (todos los turnos)
+            // y el `costUsd` definitivo del SDK. Lo que SÍ y NO
+            // actualizamos es deliberado:
+            //
+            //   - `lastTokensUsed`: SÍ actualiza con el cumulative
+            //     (input+output a través de todos los turnos). Este es
+            //     el costo billable real que la UI RECENT card + toast
+            //     muestran al cierre. usage_turn lo ponía con per-turn
+            //     delta — quedarse con eso significaría reportar el
+            //     último turn en lugar del total acumulado.
+            //
+            //   - `lastContextTokens` / `lastContextPct`: NO se tocan
+            //     en el camino normal. El SDK reporta cache_read
+            //     cumulativo en el result (puede superar 200k para
+            //     agentes con muchos turnos), y el "context activo"
+            //     real es el del último turn. Pisarlos con cumulativos
+            //     rompía la barra al cierre (V0_1_0_FIELD_REPORT.md:
+            //     contextTokens=10.9M). PERO: para runs error-only o
+            //     cached-only que nunca emiten un usage_turn (guard de
+            //     `incIn > 0 || incOut > 0` en agent-runner), si
+            //     lastContextTokens sigue en 0 al recibir usage_final,
+            //     SÍ poblamos con los cumulativos como mejor estimate
+            //     posible — preferible a mostrar 0% en un agente que
+            //     sí consumió contexto via cache.
+            //
+            //   - `lastCostUsd`: SÍ con guard >0 (el SDK manda 0
+            //     en errors antes de cobrar — guard evita pisar un
+            //     cost real con un 0 espurio).
+            lastTokensUsed = event.inputTokens + event.outputTokens;
+            if (lastContextTokens === 0) {
+              lastContextTokens =
+                event.inputTokens + event.cacheReadTokens + event.cacheCreationTokens;
+              lastContextPct = Math.min(
+                100,
+                Math.round((lastContextTokens / CONTEXT_WINDOW_TOKENS) * 100),
+              );
+            }
             if (event.costUsd > 0) {
               lastCostUsd = event.costUsd;
             }
@@ -1218,6 +1465,16 @@ export class DashboardBridge {
       clearTimeout(t);
     }
     this.maxRuntimeTimers.clear();
+
+    // Mismo patrón defensivo para los timers del transport-degraded
+    // heurístico: si dispose corre mientras un waiter está vivo, el
+    // timer se dispararía después del shutdown contra estructuras ya
+    // limpias. Los valores `null` (timer ya disparado) no requieren
+    // clearTimeout.
+    for (const timer of this.waiterDegradedState.values()) {
+      if (timer) clearTimeout(timer);
+    }
+    this.waiterDegradedState.clear();
 
     // Esperamos a que cada run() resuelva su bloque terminal
     // (status='cancelled' + completedAtIso) antes del flush final.
@@ -1581,12 +1838,19 @@ function translateToLogEntry(event: AgentEvent): LogEntry | null {
         result: event.result,
         isError: event.isError,
       };
-    case 'usage':
+    case 'usage_turn':
       return {
         ts: tsMs,
         kind: 'usage',
         tokensUsed: event.inputTokens + event.outputTokens,
       };
+    case 'usage_final':
+      // El terminal block del run() ya consume usage_final para fijar
+      // costUsd + tokensUsed acumulados; no agregamos otro entry al
+      // ringbuffer porque ya hay uno por cada `usage_turn` del agente
+      // y el LogStream del detail panel se inundaría con un duplicado
+      // visualmente idéntico al cierre.
+      return null;
     case 'status':
       // Los status changes los emitimos como agent_status_changed
       // (canal específico para que la UI no tenga que filtrar).

@@ -122,6 +122,11 @@ export type ListAgentsArgs = Record<string, never>;
 // `since`: opcional. Epoch ms; filtra entries con `ts > since` para
 //    paginación incremental. Sin `since`, devuelve todo el
 //    ringbuffer (cap 1000 del bridge).
+// `tail_lines`: opcional. Solo los últimos N entries (post-filtros).
+//    Útil para el reporte final del agente: 462 KB → ~10 KB con
+//    `tail_lines=50` (ver V0_1_0_FIELD_REPORT.md §4).
+// `kinds_filter`: opcional. Solo entries cuyo `kind` esté en la lista.
+//    Combinable con tail_lines: filtra primero, después tail.
 export const GET_AGENT_LOG_INPUT_SHAPE = {
   agent_id: z
     .string()
@@ -136,11 +141,31 @@ export const GET_AGENT_LOG_INPUT_SHAPE = {
       'Filtrar entries del log con ts > since (epoch ms). Útil para paginar incrementalmente: ' +
         'el cliente guarda el ts del último entry recibido y pide el delta en la próxima call.',
     ),
+  tail_lines: z
+    .number()
+    .int()
+    .min(1)
+    .max(2000)
+    .optional()
+    .describe(
+      'Devolver solo los últimos N entries (post-filtros). Para el reporte final del agente ' +
+        'usar tail_lines=50 + kinds_filter=["text"] para reducir 462 KB → ~10 KB.',
+    ),
+  kinds_filter: z
+    .array(z.enum(['thinking', 'text', 'tool_use', 'tool_result', 'usage']))
+    .min(1)
+    .optional()
+    .describe(
+      'Filtrar entries por tipo. Combinable con tail_lines (kind primero, tail después). ' +
+        'Ejemplo: kinds_filter=["text"] devuelve solo lo que el agente "dijo".',
+    ),
 } as const;
 
 export type GetAgentLogArgs = {
   agent_id: string;
   since?: number;
+  tail_lines?: number;
+  kinds_filter?: Array<'thinking' | 'text' | 'tool_use' | 'tool_result' | 'usage'>;
 };
 
 // === Input schema del tool `cancel_agent` ===

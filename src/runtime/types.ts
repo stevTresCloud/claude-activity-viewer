@@ -32,8 +32,39 @@ export type AgentEvent =
       result: string;
       isError: boolean;
     }
+  /**
+   * Usage incremental por TURN (un `assistant` message del SDK). Los
+   * campos `inputTokens` / `cacheReadTokens` / `cacheCreationTokens`
+   * son los del turno actual — esto representa "cuánto del context
+   * window está cargado AHORA mismo". El bridge lo usa para mover
+   * `contextTokens` y `contextUsedPct` en vivo.
+   *
+   * NO trae `costUsd`: el SDK solo expone `total_cost_usd` en el
+   * `result` final, no por turno. El costo en vivo se rellena en el
+   * próximo `usage_final` cuando el agente termine.
+   */
   | {
-      type: 'usage';
+      type: 'usage_turn';
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }
+  /**
+   * Usage acumulado al cierre del agente (SDK `result` message). Los
+   * campos token son CUMULATIVOS a través de todos los turnos — un
+   * agente con 30 turnos puede reportar `cacheReadTokens` de 10M+
+   * porque cada turno cache-read ~360k.
+   *
+   * El bridge usa este evento SOLO para fijar `costUsd` y el
+   * `tokensUsed` final billable. NO toca `contextTokens` ni
+   * `contextUsedPct` — esos quedan con el último valor de
+   * `usage_turn` (= contexto del último turno = lo que se mostraba
+   * en vivo). Si pisáramos con los cumulativos acá, la barra
+   * mostraría >> 200k (bug histórico del field report).
+   */
+  | {
+      type: 'usage_final';
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens: number;

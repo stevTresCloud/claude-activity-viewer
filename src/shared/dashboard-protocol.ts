@@ -63,6 +63,20 @@ export type ProjectLifecycle = 'active' | 'idle' | 'inactive';
 /** Prioridad de un agente pending. Reservado para queue futuro. */
 export type Priority = 'LOW' | 'MED' | 'HIGH';
 
+/**
+ * Estado heurístico del transport MCP. El bridge lo deriva del tiempo
+ * que llevan los `wait_for_agents` activos: si alguno está vivo > 60s
+ * sin haber resuelto, asumimos que el transport HTTP **puede** haber
+ * tirado (síntoma exacto del field report v0.1.0 — los agentes siguen
+ * corriendo pero el long-poll del chat caller nunca recibe respuesta).
+ * Se reinicia a `'healthy'` cuando los waiters resuelven.
+ *
+ * El banner del dashboard que renderiza esto es opt-in via setting
+ * `claudeOrchestrator.showTransportState` (default false) hasta que la
+ * heurística esté validada en uso productivo.
+ */
+export type TransportState = 'healthy' | 'degraded';
+
 // === Entidades del wire ===
 
 /**
@@ -318,7 +332,14 @@ export type DashboardEventToWebview =
    * ringbuffer del bridge en un solo evento (vs N×agent_log) — para
    * un agente con 1000 entries, esto es ~1 frame en vez de 1000.
    */
-  | { type: 'agent_log_history'; agentId: string; entries: LogEntry[] };
+  | { type: 'agent_log_history'; agentId: string; entries: LogEntry[] }
+  /**
+   * Transición del estado heurístico del transport. Se emite SOLO
+   * cuando cambia (no en cada update); la UI guarda el último valor
+   * recibido. El sidebar puede usarlo para mostrar un banner con
+   * "transport may have dropped — re-call wait_for_agents to recover".
+   */
+  | { type: 'transport_state_changed'; state: TransportState };
 
 // === Eventos Webview → Extension (declarados, sin handler todavía) ===
 

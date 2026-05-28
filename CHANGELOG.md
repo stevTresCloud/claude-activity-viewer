@@ -4,6 +4,81 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-pre.1] — 2026-05-28
+
+First v0.2 milestone — **transport robustness + critical papercuts**. Closes ticket #0 of the v0.2 backlog, driven by `research/V0_1_0_FIELD_REPORT.md` (3 transport drops + 4 papercuts observed in the first productive use on 2026-05-27 night).
+
+### Added
+
+#### Idempotency for `wait_for_agents`
+
+- Server-side `SharedWaiter` cache keyed by `sha-stable(sortedAgentIds)`. When a second `wait_for_agents` arrives for the same set within the 30-min TTL, it **fans in** to the same in-flight Promise instead of starting a parallel waiter. Survives transport drops mid-call: the model re-invokes with the same `agent_ids` and resumes the long-poll from where it was.
+- LRU cap of 32 active waiters; FIFO eviction with cascade cleanup of timer + degraded-state entries.
+- Tool description warns the model: re-invoke on `"transport dropped mid-call"` errors instead of abandoning; second-call `timeout_sec` is ignored (the first call's value wins).
+
+#### Transport resilience (HTTP)
+
+- `Connection: keep-alive` + `Keep-Alive: timeout=1200, max=1000` headers per request to make long-polls tolerant of intermediate-proxy idle disconnects.
+- `socket.setKeepAlive(true, 15s)` + `socket.setTimeout(0)` on each authenticated request — TCP probes every 15s keep the socket alive against silent kernel/middleware reaps; idle timeout disabled to support the full 1200s long-poll window.
+- Defensive `?.` guards on the socket calls to survive aborted-before-handler clients.
+
+#### Transport health heuristic (opt-in)
+
+- New `transportState: 'healthy' | 'degraded'` derived from per-waiter timers. When any `wait_for_agents` is alive >60s without resolving, the bridge marks the transport as `degraded` and broadcasts `transport_state_changed` to all webviews.
+- New setting `claudeOrchestrator.showTransportState` (default `false`, opt-in until validated in productive use): when enabled, a yellow banner appears at the top of the dashboard sidebar with copy *"Transport may be slow — agents still running. Re-invoke wait_for_agents from chat to resume the long-poll."* Banner inherits `--color-warning` so it adapts to light/high-contrast/custom VS Code themes.
+- Replay on `attachWebview`: a newly-opened sidebar receives the current state immediately (not just transitions).
+
+#### `get_agent_log` filters for efficient reads
+
+- New optional args: `tail_lines` (1–2000) and `kinds_filter` (`['text'|'thinking'|'tool_use'|'tool_result'|'usage']`). Pipeline applies `kinds_filter` → `since` → `tail_lines`.
+- Tool description advertises the efficient mode: `kinds_filter: ['text'] + tail_lines: 50` reduces a 462 KB output to ~10 KB for the typical "show me the agent's final report" use case. Default (no args) preserves legacy compatibility (full ringbuffer).
+
+#### Cost UX
+
+- `costUsd` chip in the detail panel now renders `"computing…"` italic dim while the agent is `running` and the value is still 0/undefined (the SDK only exposes `total_cost_usd` in the final `result` event, so mid-run rendering `$0.00` was misleading). Terminal states preserve `"$0.00"` literal for legitimately-zero runs.
+
+#### ContextBar UX
+
+- Tooltip explains the metric: *"Percentage of the model context window used (input + cache read + cache creation). Prompt caching from Anthropic lets this go past 50% with near-zero cost — that is a feature of the platform, not a bug."*
+- New preventive color band: success <60% → warning yellow <85% → orange 85–95% → error red ≥95%. Helps users recognize the "close to limit" state before auto-truncate triggers.
+
+### Fixed
+
+- **`contextTokens` reported as 10.9M** (V0_1_0_FIELD_REPORT.md §4): the `AgentEvent` union was split from a single `'usage'` variant into `'usage_turn'` (per-turn, gauge semantics) and `'usage_final'` (cumulative at SDK `result`, billable semantics). The bridge consumes them differently:
+  - `usage_turn` → updates `contextTokens` / `contextUsedPct` (gauge of the active turn's context) and `tokensUsed` (per-turn delta).
+  - `usage_final` → updates `tokensUsed` to the cumulative cross-turn total (billable) and `costUsd` to the SDK's authoritative value; does **not** overwrite `contextTokens` because the SDK reports cumulative cache reads there which can exceed 200k (the historical 10.9M bug).
+  - Fallback: if `usage_final` arrives without any preceding `usage_turn` (error-only / cached-only short runs that never emit an assistant message), the cumulative tokens are used to populate `contextTokens` as a best-effort estimate.
+- **`tokensUsed` regression in RECENT cards** (caught by code-review stage 1): the terminal-block fallback `lastTokensUsed || result.inputTokens + result.outputTokens` was being bypassed because `usage_turn` set `lastTokensUsed` to a per-turn delta (non-zero, truthy). Long agents would report e.g. `5k` (last turn) instead of `150k` (cumulative). Fix: `usage_final` now updates `lastTokensUsed` with the cumulative value.
+- **LRU eviction broke `waiterCache ↔ waiterDegradedState` invariant** (caught by code-review stage 2): the evicted waiter's `.finally` could later delete a new waiter's degraded-state entry under the same key. Fix: identity guard `waiterCache.get(key) === waiter` gates the entire cleanup, and the LRU branch proactively clears the degraded-state entry of the evicted waiter.
+- **Detail panel was not receiving feature flags** (caught by code-review stage 2): `dashboard.ts` injected `flags.showTransportState` via `WebviewBootConfig` but `detail-panel.ts` did not — a trap for any future component that reads the flag from outside the sidebar. Now both injectors are symmetric.
+- **Toolbar warning banner used hardcoded `rgb(255 193 7 …)` literals** instead of `--color-warning`. Replaced with `color-mix(in srgb, var(--color-warning) <alpha>%, transparent)` so the banner adapts to all VS Code themes.
+
+### Changed
+
+- `formatCostUsd(n, status?)` accepts an optional `AgentStatus` (typed from `dashboard-protocol.ts`, not inlined) to render the `"computing…"` placeholder when running with `n=0|undefined`.
+- `bridge.getAgentLog(agentId, opts?)` accepts an options object `{since?, tailLines?, kindsFilter?}` instead of a single `since` positional argument. The MCP server passes through the new optional fields. Internal callers updated.
+- `bridge.waitForAgents()` is now a sync method that returns `Promise<WaitForAgentsResult>` (not `async`) — this preserves Promise referential identity for the idempotency fan-in. With `async`, the JS engine wraps the return value in a fresh Promise and breaks `p1 === p2` checks.
+- `runWait` (private helper extracted from `waitForAgents`) resolves directly to `WaitForAgentsResult` (was `boolean → .then`).
+- `transportDegradedTimers` Map + `degradedWaiters` Set collapsed into a single `waiterDegradedState: Map<string, NodeJS.Timeout | null>` (where `null` means "timer fired, waiter is degraded"). Half the cleanup branches, single source of truth.
+
+### Tests
+
+- 30 new vitest tests (358 total, up from 328):
+  - Idempotency: fan-in identity, key stability across input order, post-resolve cache miss, second-caller `timeoutMs` ignored, TTL expiry forces fresh waiter.
+  - `transportState`: replay on attach, transition healthy→degraded after threshold, no-transition when waiter resolves fast.
+  - `usage_final` separation: cumulative tokens populate `tokensUsed` but **not** `contextTokens` after a `usage_turn` ran first; cumulative populates both as fallback when no `usage_turn` preceded.
+  - `getAgentLog` filters: `tail_lines`, `kinds_filter`, both combined (filter→tail), legacy default (no opts).
+  - Zod schema bounds: `tail_lines` 1–2000, `kinds_filter` enum + non-empty array.
+  - `http-transport`: keep-alive headers applied, `setKeepAlive(true, 15s)`, `setTimeout(0)`, hooks skipped on 404/401 short-circuits.
+  - `formatCostUsd`: `running` + 0/undefined → `"computing…"`; running with real value → formatted; terminal states → literal `$0.00`.
+
+### Internal
+
+- New file `src/mcp/__tests__/http-transport.test.ts`.
+- `OrchestratorHttpServer.handleRequest()` exposed as `public` to enable direct testing (ESM blocks `vi.spyOn(http, 'createServer')`).
+
+---
+
 ## [0.1.0] — 2026-05-27
 
 First public release. The extension exposes an embedded MCP server with 5 tools, a live kanban dashboard, real cancel, long-poll fan-in, session resume, and a detail panel — all driven from any external Claude Code chat.

@@ -384,7 +384,19 @@ export class OrchestratorMcpServer {
           'NOTAS: para tareas ligeras (consulta web, código corto) usar timeout_sec=30-60. Para ' +
           'tareas pesadas (migraciones, audits) usar 600-1200. El plugin tiene un cap defensivo ' +
           'global (`claudeOrchestrator.maxAgentRuntimeSec`, default 2000s) que cancela agentes ' +
-          'que viven más de eso con `reason: max_runtime_exceeded`.',
+          'que viven más de eso con `reason: max_runtime_exceeded`.\n\n' +
+          'RESILIENCE: if the MCP transport drops mid-call ' +
+          '("transport dropped mid-call; response for tool wait_for_agents was lost"), re-invoke ' +
+          'this tool with the SAME `agent_ids`. The server preserves the waiter via idempotency ' +
+          '(30 min TTL): your retry fans-in to the existing long-poll instead of restarting it, ' +
+          'so the wait resumes from where it was. Do NOT abandon the task on transport drop — ' +
+          'the agents continue running in the background regardless of wait status, and a ' +
+          'simple re-call recovers the result without losing progress.\n\n' +
+          'CAVEAT: when fanning-in to an existing waiter, your `timeout_sec` is IGNORED — the ' +
+          'shared waiter uses the original timeout from the first call. If the first call used ' +
+          'timeout=1200 and you retry with timeout=60 expecting fail-fast, you still wait up to ' +
+          'the original 1200. To bound aggressively, use `cancel_agent` instead of relying on ' +
+          'a shorter retry timeout.',
         inputSchema: WAIT_FOR_AGENTS_INPUT_SHAPE,
       },
       async (args: WaitForAgentsArgs) => {
@@ -434,13 +446,20 @@ export class OrchestratorMcpServer {
         title: 'Get agent log',
         description:
           'Devuelve los eventos del log de un agente (thinking, text, tool_use, tool_result, usage). ' +
-          'Ringbuffer de 1000 entries FIFO del bridge. ' +
-          'Argumentos: agent_id (required), since (opcional, epoch ms para paginación incremental). ' +
+          'Ringbuffer de 1000 entries FIFO del bridge.\n\n' +
+          'EFFICIENT READ: para el reporte final del agente, pasar ' +
+          '`kinds_filter: ["text"]` + `tail_lines: 50`. Reduce un log de 462 KB → ~10 KB ' +
+          'sin perder el output del agente (los `text` son lo que el agente "dijo"). ' +
+          'Sin filtros devuelve el ringbuffer completo (legacy compat).\n\n' +
           'Si el agentId no existe, retorna `{error: "agent_not_found", agent_id}`.',
         inputSchema: GET_AGENT_LOG_INPUT_SHAPE,
       },
       async (args: GetAgentLogArgs) => {
-        const result = this.bridge.getAgentLog(args.agent_id, args.since);
+        const result = this.bridge.getAgentLog(args.agent_id, {
+          since: args.since,
+          tailLines: args.tail_lines,
+          kindsFilter: args.kinds_filter,
+        });
         if (!result) {
           this.channel.appendLine(
             `[${ts()}] [mcp] get_agent_log agent=${args.agent_id.slice(0, 8)} not_found`,

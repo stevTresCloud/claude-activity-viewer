@@ -177,4 +177,23 @@ describe('formatCostUsd', () => {
     expect(formatCostUsd(-0.5)).toBe('—');
     expect(formatCostUsd(Number.POSITIVE_INFINITY)).toBe('—');
   });
+
+  // === Status-aware: mid-run el SDK no expone total_cost_usd hasta el
+  // `result` final. Mostrar "$0.00" engaña al user — preferimos
+  // "computing…" como placeholder durante running. Subtarea G ticket #0.
+  it('status=running con valor 0 o undefined → "computing…"', () => {
+    expect(formatCostUsd(0, 'running')).toBe('computing…');
+    expect(formatCostUsd(undefined, 'running')).toBe('computing…');
+  });
+
+  it('status=running con valor real ya llegado → format normal', () => {
+    expect(formatCostUsd(0.0023, 'running')).toBe('$0.0023');
+    expect(formatCostUsd(1.42, 'running')).toBe('$1.42');
+  });
+
+  it('status terminales con 0 → "$0.00" (NO "computing…")', () => {
+    expect(formatCostUsd(0, 'done')).toBe('$0.00');
+    expect(formatCostUsd(0, 'failed')).toBe('$0.00');
+    expect(formatCostUsd(0, 'cancelled')).toBe('$0.00');
+  });
 });

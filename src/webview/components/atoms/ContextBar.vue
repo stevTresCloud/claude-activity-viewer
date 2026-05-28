@@ -44,10 +44,21 @@ const props = withDefaults(
 );
 
 // === Color del fill por umbral ===
+//
+// 4 tramos:
+//   < 60%  success (verde) — uso normal
+//   < 85%  warning (amarillo) — el context se está llenando
+//   < 95%  warning intensificado (naranja) — preventivo, cerca del límite
+//   ≥ 95%  error (rojo) — riesgo de auto-truncate del SDK pronto
+//
+// El usuario rara vez ve naranja: el SDK Anthropic activa prompt-caching
+// agresivo + auto-summary mucho antes; pero cuando aparece es señal real
+// de que conviene cerrar el agente y arrancar uno nuevo.
 
 const fillColor = computed(() => {
   if (props.pct < 60) return 'var(--color-success)';
   if (props.pct < 85) return 'var(--color-warning)';
+  if (props.pct < 95) return 'rgb(255 140 0)';
   return 'var(--color-error)';
 });
 
@@ -72,10 +83,19 @@ const labelRight = computed(() => {
 // Clamp defensivo — si el backend manda 105 evitamos overflow
 // visual del fill. No corregimos el dato, solo el render.
 const clampedPct = computed(() => Math.max(0, Math.min(100, props.pct)));
+
+// Tooltip explicativo: el `contextUsedPct` confunde al user porque
+// puede llegar a 80%+ con cost~0 (prompt cache hits son baratísimos).
+// Aclaramos qué mide.
+const tooltipText =
+  'Percentage of the model context window used (input + cache read + ' +
+  'cache creation). Prompt caching from Anthropic lets this go past 50% ' +
+  'with near-zero cost — that is a feature of the platform, not a bug. ' +
+  'Yellow at 60%, orange at 85% (preventive), red at 95% (close to limit).';
 </script>
 
 <template>
-  <div class="context-bar">
+  <div class="context-bar" :title="tooltipText">
     <div class="label-row">
       <span class="label-text">Context</span>
       <span class="label-right">{{ labelRight }}</span>

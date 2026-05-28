@@ -1,3 +1,5 @@
+import type { AgentStatus } from './dashboard-protocol';
+
 /* ================================================================
  * format.ts — Helpers de formato compartidos entre extension host
  * (CJS) y webview (ESM). Stack-agnostic: cero deps de Vue / vscode.
@@ -119,15 +121,25 @@ export function formatTokens(n: number | undefined): string {
  *   - < $1    → 3 decimales (legible para batches chicos).
  *   - >= $1   → 2 decimales (formato dinero estándar).
  *
+ * Estado `running`: el SDK solo expone `total_cost_usd` en el `result`
+ * final, así que mid-run el valor es 0/undefined. Mostrar "$0.00" en
+ * vivo es engañoso ("el agente no gastó nada"). Cuando el caller pasa
+ * `status='running'` y el valor es 0/undefined, devolvemos "computing…"
+ * (no "—": el valor llegará pronto, no es definitivo "no aplica").
+ *
  * Ejemplos:
- *   formatCostUsd(0)         → "$0.00"
- *   formatCostUsd(0.0023)    → "$0.0023"
- *   formatCostUsd(0.157)     → "$0.157"
- *   formatCostUsd(1.42)      → "$1.42"
- *   formatCostUsd(12.5)      → "$12.50"
- *   formatCostUsd(undefined) → "—"
+ *   formatCostUsd(0)                    → "$0.00"
+ *   formatCostUsd(0, 'running')         → "computing…"
+ *   formatCostUsd(0, 'done')            → "$0.00"
+ *   formatCostUsd(0.0023, 'running')    → "$0.0023" (valor real ya llegó)
+ *   formatCostUsd(undefined)            → "—"
+ *   formatCostUsd(undefined, 'running') → "computing…"
  */
-export function formatCostUsd(n: number | undefined): string {
+export function formatCostUsd(
+  n: number | undefined,
+  status?: AgentStatus,
+): string {
+  if (status === 'running' && (n === undefined || n === 0)) return 'computing…';
   if (n === undefined || !Number.isFinite(n) || n < 0) return '—';
   if (n === 0) return '$0.00';
   if (n < 0.01) return `$${n.toFixed(4)}`;

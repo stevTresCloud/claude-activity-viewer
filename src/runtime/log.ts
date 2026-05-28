@@ -50,11 +50,17 @@ export function logAgentEvent(
         `[${stamp}] tool_result: id=${event.toolUseId} error=${event.isError} result=${truncate(event.result)}`,
       );
       break;
-    case 'usage':
+    case 'usage_turn':
       channel.appendLine(
-        `[${stamp}] usage: in=${event.inputTokens} out=${event.outputTokens}` +
+        `[${stamp}] usage_turn: in=${event.inputTokens} out=${event.outputTokens}` +
+          ` cacheR=${event.cacheReadTokens} cacheC=${event.cacheCreationTokens}`,
+      );
+      break;
+    case 'usage_final':
+      channel.appendLine(
+        `[${stamp}] usage_final: in=${event.inputTokens} out=${event.outputTokens}` +
           ` cacheR=${event.cacheReadTokens} cacheC=${event.cacheCreationTokens}` +
-          ` cost=$${event.costUsd.toFixed(4)}`,
+          ` cost=$${event.costUsd.toFixed(4)} (cumulative)`,
       );
       break;
     case 'status':

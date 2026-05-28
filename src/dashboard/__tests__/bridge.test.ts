@@ -147,18 +147,17 @@ function postedOf<T extends DashboardEventToWebview['type']>(
 }
 
 /**
- * emitUsage — fixture builder para AgentEvent type='usage'. Centraliza
- * los campos cache/cost que el bridge no inspecciona en estos tests
- * para evitar repetir el shape completo en cada caso.
+ * emitUsage — fixture builder para AgentEvent type='usage_turn'. Centraliza
+ * los campos cache que el bridge no inspecciona en estos tests para evitar
+ * repetir el shape completo en cada caso.
  */
 function emitUsage(runner: FakeAgentRunner, inputTokens: number, outputTokens: number): void {
   runner.emit({
-    type: 'usage',
+    type: 'usage_turn',
     inputTokens,
     outputTokens,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
-    costUsd: 0,
   });
 }
 
@@ -680,12 +679,11 @@ describe('DashboardBridge — integración', () => {
     bridge.attachWebview(webview as never);
     bridge.spawn({ prompt: 'hi', cwd: '/repos/myproj' });
     runner.emit({
-      type: 'usage',
+      type: 'usage_turn',
       inputTokens: 1,
       outputTokens: 8,
       cacheReadTokens: 105_583,
       cacheCreationTokens: 14_254,
-      costUsd: 0,
     });
     const changes = postedOf(webview, 'agent_status_changed');
     const last = changes[changes.length - 1];
@@ -1178,13 +1176,13 @@ describe('DashboardBridge — integración', () => {
 
     // Pedimos entries con ts > el del segundo → solo el tercero queda.
     const tsCut = all[1].ts;
-    const filtered = bridge.getAgentLog(agentId, tsCut)?.entries ?? [];
+    const filtered = bridge.getAgentLog(agentId, { since: tsCut })?.entries ?? [];
     expect(filtered).toHaveLength(1);
     expect(filtered[0].text).toBe('c');
 
     // since del último → array vacío.
     const tsLast = all[2].ts;
-    expect(bridge.getAgentLog(agentId, tsLast)?.entries).toEqual([]);
+    expect(bridge.getAgentLog(agentId, { since: tsLast })?.entries).toEqual([]);
 
     vi.useRealTimers();
     runner.finish({ status: 'completed', durationMs: 1 });
@@ -1560,6 +1558,452 @@ describe('DashboardBridge — integración', () => {
       expect(result.pending[0].last_message_partial).toBe('agente2 procesando...');
 
       vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    // === Idempotency (subtarea A del ticket #0 v0.2) ===
+    //
+    // Una segunda call con el mismo set de agent_ids dentro del TTL del
+    // waiter debe suscribirse al MISMO Promise — fan-in. Cubre el
+    // escenario "transport drop + retry" documentado en el field report.
+
+    it('idempotency: dos waitForAgents con mismos ids retornan el MISMO Promise (fan-in)', async () => {
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'task',
+        cwd: '/repos/myproj',
+      });
+
+      const p1 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      const p2 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      // El fan-in real: misma referencia de Promise para ambos callers.
+      // Sin esto, cada call habría creado su propio listener + timer y
+      // duplicado el trabajo del long-poll.
+      expect(p1).toBe(p2);
+
+      runner.emit({ type: 'text', text: 'shared result' });
+      runner.finish({ status: 'completed', durationMs: 500 });
+      await finished;
+      const [r1, r2] = await Promise.all([p1, p2]);
+      expect(r1).toBe(r2);
+      expect(r1.results[0].last_message).toBe('shared result');
+    });
+
+    it('idempotency: orden distinto de agent_ids comparte el mismo waiter (key estable)', async () => {
+      bridge.attachWebview(webview as never);
+      // FakeAgentRunner solo soporta UN resolver vivo a la vez. Cerramos
+      // el primero antes de spawnear el segundo para no perder al primer
+      // resolver — el wait usa AMBOS ids pero el agente A ya está done
+      // (cheap-path para A) y B sigue running (long-poll real).
+      const a = bridge.spawn({ prompt: 'a', cwd: '/repos/p1' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await a.finished;
+
+      const b = bridge.spawn({ prompt: 'b', cwd: '/repos/p2' });
+
+      const p1 = bridge.waitForAgents({
+        agentIds: [a.agentId, b.agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      const p2 = bridge.waitForAgents({
+        // Orden invertido — el chat caller puede mandar los ids en
+        // cualquier orden tras un drop. La key del waiter lo normaliza.
+        agentIds: [b.agentId, a.agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(p1).toBe(p2);
+
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await b.finished;
+      await Promise.all([p1, p2]);
+    });
+
+    it('idempotency: segundo caller con timeoutMs distinto recibe el promise existente — su timeout es IGNORADO', async () => {
+      // Contrato documentado en server.ts + tool description: el waiter
+      // compartido usa los params del PRIMER call. Verificamos que un
+      // retry con timeoutMs corto no acelera la resolución.
+      vi.useFakeTimers();
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'long',
+        cwd: '/repos/myproj',
+      });
+
+      const p1 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Segundo caller pide timeoutMs corto (1s). Si el fan-in honrara el
+      // segundo timeout, p2 resolvería en 1s con timed_out=true. Como
+      // honra el del primero, ambos resuelven en t=5s.
+      const p2 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 1_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(p1).toBe(p2);
+
+      // Avanzamos 2s — segundo timeout habría disparado, pero compartido NO.
+      await vi.advanceTimersByTimeAsync(2_000);
+      // Avanzamos hasta el primer timeout.
+      await vi.advanceTimersByTimeAsync(4_000);
+      const r1 = await p1;
+      expect(r1.timed_out).toBe(true);
+      expect(r1.pending).toHaveLength(1);
+
+      vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+      await finished;
+    });
+
+    it('idempotency: TTL expirado en cache descarta el entry viejo y crea waiter nuevo', async () => {
+      // El cache tiene TTL de 30 min. Una segunda call DESPUÉS del TTL
+      // tiene que crear un waiter fresh aunque el agentId sea el mismo.
+      vi.useFakeTimers();
+      const baseTime = new Date('2026-05-28T10:00:00Z').getTime();
+      vi.setSystemTime(baseTime);
+
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'long',
+        cwd: '/repos/myproj',
+      });
+      const p1 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+
+      // Saltamos > 30 min y forzamos resolución del primer waiter.
+      vi.setSystemTime(baseTime + 31 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await p1;
+
+      const p2 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      // p2 NO debe ser p1: el cache miró que el entry estaba expirado
+      // (createdAt + TTL < now) y descartó antes de buscar fan-in.
+      expect(p2).not.toBe(p1);
+      vi.useRealTimers();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+      await finished;
+    });
+
+    it('idempotency: tras resolver el waiter, una call siguiente NO reusa la promise cacheada', async () => {
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'task',
+        cwd: '/repos/myproj',
+      });
+
+      const p1 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      runner.finish({ status: 'completed', durationMs: 200 });
+      await finished;
+      await p1;
+
+      // Damos un microtask al .finally() del bridge para que limpie el cache.
+      await Promise.resolve();
+      // Segunda call cae al cheap-path (agente terminado) y vuelve
+      // resultado fresco — no debe ser la misma Promise resuelta.
+      const p2 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 60_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(p2).not.toBe(p1);
+      const r2 = await p2;
+      expect(r2.results[0].status).toBe('done');
+    });
+  });
+
+  // =====================================================================
+  // === transportState (subtarea D del ticket #0 v0.2) ==================
+  // =====================================================================
+  //
+  // Heurística: si un wait_for_agents lleva >60s sin resolver, marcamos
+  // `transportState='degraded'`. Cuando resuelve, vuelve a `'healthy'`.
+  // Una transición emite `transport_state_changed` al webview.
+
+  describe('transportState', () => {
+    it('arranca healthy y emite el estado al attach (replay)', () => {
+      bridge.attachWebview(webview as never);
+      expect(bridge.getTransportState()).toBe('healthy');
+      const transports = postedOf(webview, 'transport_state_changed');
+      expect(transports).toHaveLength(1);
+      expect(transports[0].state).toBe('healthy');
+    });
+
+    it('transiciona a degraded a los 60s con un waiter activo y emite el evento UNA vez', async () => {
+      vi.useFakeTimers();
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({ prompt: 'slow', cwd: '/repos/p' });
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 120_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(bridge.getTransportState()).toBe('healthy');
+
+      // Avanzamos 65s — pasa el threshold de TRANSPORT_DEGRADED (60s).
+      await vi.advanceTimersByTimeAsync(65_000);
+      expect(bridge.getTransportState()).toBe('degraded');
+
+      // El bridge ya emitió un transport_state_changed inicial al
+      // attach (healthy). Esperamos otro con state='degraded'.
+      const transports = postedOf(webview, 'transport_state_changed');
+      const degraded = transports.filter((t) => t.state === 'degraded');
+      expect(degraded).toHaveLength(1);
+
+      // Resolvemos el waiter y verificamos vuelta a healthy.
+      await vi.advanceTimersByTimeAsync(60_000);
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+      await waitPromise;
+      // El .finally() del waiter limpia el degradedWaiter set; el
+      // updateTransportState emite el healthy.
+      expect(bridge.getTransportState()).toBe('healthy');
+      const healthy = postedOf(webview, 'transport_state_changed').filter(
+        (t) => t.state === 'healthy',
+      );
+      // 1 del attach inicial + 1 de la transición desde degraded.
+      expect(healthy).toHaveLength(2);
+
+      vi.useRealTimers();
+    });
+
+    it('no transiciona si el waiter resuelve antes del threshold', async () => {
+      vi.useFakeTimers();
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({
+        prompt: 'fast',
+        cwd: '/repos/p',
+      });
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 120_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Resolvemos a los 10s — bien antes del threshold de 60s.
+      await vi.advanceTimersByTimeAsync(10_000);
+      runner.finish({ status: 'completed', durationMs: 10_000 });
+      await finished;
+      await waitPromise;
+
+      expect(bridge.getTransportState()).toBe('healthy');
+      const degraded = postedOf(webview, 'transport_state_changed').filter(
+        (t) => t.state === 'degraded',
+      );
+      expect(degraded).toHaveLength(0);
+
+      vi.useRealTimers();
+    });
+  });
+
+  // =====================================================================
+  // === usage_final NO toca contextTokens (subtarea F del ticket #0) ====
+  // =====================================================================
+
+  describe('usage_final separation', () => {
+    it('usage_final actualiza costUsd pero deja contextTokens del último usage_turn', () => {
+      bridge.attachWebview(webview as never);
+      bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+
+      // Turn 1: agente reporta 110k context activo (representativo de un
+      // turno mid-run con bastante cache).
+      runner.emit({
+        type: 'usage_turn',
+        inputTokens: 100,
+        outputTokens: 500,
+        cacheReadTokens: 105_000,
+        cacheCreationTokens: 4_900,
+      });
+
+      // Cierre: el SDK emite el result con cumulativos cross-turn — los
+      // cacheRead+cacheCreation del result son la suma de TODOS los
+      // turnos (puede ser >> 200k). El bug histórico: el bridge pisaba
+      // contextTokens con esos cumulativos → ContextBar mostraba 10M+.
+      runner.emit({
+        type: 'usage_final',
+        inputTokens: 200,
+        outputTokens: 800,
+        cacheReadTokens: 10_500_000,
+        cacheCreationTokens: 400_000,
+        costUsd: 0.87,
+      });
+
+      const changes = postedOf(webview, 'agent_status_changed');
+      const last = changes[changes.length - 1];
+      // contextTokens debe seguir siendo el del último usage_turn
+      // (100 + 105000 + 4900 = 109_900). NO el cumulative del final.
+      const allWithContext = changes.filter(
+        (c) => c.metadata?.contextTokens !== undefined,
+      );
+      const lastContext = allWithContext[allWithContext.length - 1];
+      // 100 + 105_000 + 4_900 = 110_000 (último usage_turn, NO el final).
+      expect(lastContext.metadata?.contextTokens).toBe(110_000);
+      // contextUsedPct = 110_000 / 200_000 = 55%.
+      expect(lastContext.metadata?.contextUsedPct).toBe(55);
+      // costUsd sí se actualiza con el cumulative real del SDK.
+      expect(last.metadata?.costUsd).toBe(0.87);
+      // Cerramos el run para que dispose() no espere indefinidamente.
+      runner.finish({ status: 'completed', durationMs: 1 });
+    });
+
+    it('usage_final POBLA tokensUsed con cumulative cross-turn (regresión guard)', async () => {
+      // Bug histórico: el bridge se quedaba con `lastTokensUsed` del
+      // último `usage_turn` (per-turn delta, ~5k) y reportaba eso en
+      // RECENT cards + toast en lugar del cumulative real (~150k para
+      // 30 turnos). El terminal block `lastTokensUsed || result.input+
+      // output` no caía al fallback porque lastTokensUsed era truthy.
+      bridge.attachWebview(webview as never);
+      const { finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      runner.emit({
+        type: 'usage_turn',
+        inputTokens: 100,
+        outputTokens: 500,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      runner.emit({
+        type: 'usage_turn',
+        inputTokens: 200,
+        outputTokens: 800,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      // Cumulative real al cierre del SDK (suma de los 2 turnos = 1600).
+      runner.emit({
+        type: 'usage_final',
+        inputTokens: 300,
+        outputTokens: 1300,
+        cacheReadTokens: 50_000,
+        cacheCreationTokens: 5_000,
+        costUsd: 0.05,
+      });
+      runner.finish({
+        status: 'completed',
+        durationMs: 2000,
+        inputTokens: 300,
+        outputTokens: 1300,
+      });
+      await finished;
+      const completed = postedOf(webview, 'agent_completed');
+      // Bug regression: si el handler ignorara usage_final, tokensUsed
+      // mostraría el último turn delta (200+800=1000), NO el cumulative.
+      expect(completed[0].result.tokensUsed).toBe(1600);
+    });
+
+    it('usage_final POBLA contextTokens fallback cuando no hubo usage_turn (error-only run)', () => {
+      // Edge case: runs error-only o cached-only sin assistant message
+      // nunca disparan `usage_turn` (agent-runner los gate con
+      // inputTokens>0 || outputTokens>0). Sin fallback, ContextBar
+      // mostraría 0% para agentes que sí consumieron 50k+ via cache.
+      bridge.attachWebview(webview as never);
+      bridge.spawn({ prompt: 'fail', cwd: '/repos/p' });
+      // Solo usage_final, sin usage_turn previo.
+      runner.emit({
+        type: 'usage_final',
+        inputTokens: 200,
+        outputTokens: 0,
+        cacheReadTokens: 60_000,
+        cacheCreationTokens: 5_000,
+        costUsd: 0.001,
+      });
+      const changes = postedOf(webview, 'agent_status_changed');
+      const last = changes[changes.length - 1];
+      // 200 + 60_000 + 5_000 = 65_200 (fallback al cumulative del final).
+      expect(last.metadata?.contextTokens).toBe(65_200);
+      expect(last.metadata?.contextUsedPct).toBe(33);
+      runner.finish({ status: 'completed', durationMs: 1 });
+    });
+  });
+
+  // =====================================================================
+  // === getAgentLog filtros (subtarea E del ticket #0) ==================
+  // =====================================================================
+
+  describe('getAgentLog opts', () => {
+    it('tail_lines retorna solo los últimos N entries', () => {
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({ prompt: 'x', cwd: '/repos/p' });
+      for (let i = 0; i < 10; i++) {
+        runner.emit({ type: 'text', text: `entry ${i}` });
+      }
+      const res = bridge.getAgentLog(agentId, { tailLines: 3 });
+      expect(res?.entries).toHaveLength(3);
+      expect((res?.entries[0] as { text: string }).text).toBe('entry 7');
+      expect((res?.entries[2] as { text: string }).text).toBe('entry 9');
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('kinds_filter filtra por kind antes del tail', () => {
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({ prompt: 'x', cwd: '/repos/p' });
+      runner.emit({ type: 'text', text: 'reply 1' });
+      runner.emit({ type: 'tool_use', name: 'Read', input: { file: 'a' } });
+      runner.emit({
+        type: 'tool_result',
+        toolUseId: 't1',
+        result: 'ok',
+        isError: false,
+      });
+      runner.emit({ type: 'text', text: 'reply 2' });
+      runner.emit({ type: 'thinking', text: 'thinking aloud' });
+
+      const res = bridge.getAgentLog(agentId, { kindsFilter: ['text'] });
+      expect(res?.entries.map((e) => e.kind)).toEqual(['text', 'text']);
+      expect((res?.entries[1] as { text: string }).text).toBe('reply 2');
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('kinds_filter + tail_lines combinados: filtra y después tail', () => {
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({ prompt: 'x', cwd: '/repos/p' });
+      runner.emit({ type: 'text', text: 'r1' });
+      runner.emit({ type: 'tool_use', name: 'Read', input: {} });
+      runner.emit({ type: 'text', text: 'r2' });
+      runner.emit({ type: 'text', text: 'r3' });
+      runner.emit({ type: 'thinking', text: 'noise' });
+
+      const res = bridge.getAgentLog(agentId, {
+        kindsFilter: ['text'],
+        tailLines: 2,
+      });
+      // 3 text entries → tail 2 → ['r2', 'r3'].
+      expect(res?.entries).toHaveLength(2);
+      expect((res?.entries[0] as { text: string }).text).toBe('r2');
+      expect((res?.entries[1] as { text: string }).text).toBe('r3');
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('default (sin opts) devuelve el ringbuffer completo — legacy compat', () => {
+      bridge.attachWebview(webview as never);
+      const { agentId } = bridge.spawn({ prompt: 'x', cwd: '/repos/p' });
+      runner.emit({ type: 'text', text: 'a' });
+      runner.emit({ type: 'tool_use', name: 'Read', input: {} });
+      runner.emit({ type: 'thinking', text: 'b' });
+
+      const res = bridge.getAgentLog(agentId);
+      expect(res?.entries).toHaveLength(3);
       runner.finish({ status: 'cancelled', durationMs: 1 });
     });
   });

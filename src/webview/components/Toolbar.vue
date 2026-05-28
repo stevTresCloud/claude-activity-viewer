@@ -41,6 +41,19 @@ const store = useAgentsStore();
 const scanner = useScannerStore();
 const { selectedProjectId } = useProjectFilter();
 
+// === Feature flag: banner del transport degraded ===
+//
+// Default false hasta validar la heurística en uso productivo. El
+// extension inyecta el valor del setting `claudeOrchestrator.show
+// TransportState` via `window.__claudeOrchestrator.flags` al construir
+// el HTML del webview (ver src/views/dashboard.ts).
+const showTransportBanner = computed<boolean>(() => {
+  const flagOn = typeof window !== 'undefined'
+    ? window.__claudeOrchestrator?.flags?.showTransportState === true
+    : false;
+  return flagOn && store.transportState === 'degraded';
+});
+
 // === Resolver projectName del id seleccionado ===
 
 const selectedProjectName = computed<string | null>(() => {
@@ -141,6 +154,20 @@ const contextInfo = computed<ContextInfo | null>(() => {
 
 <template>
   <div class="toolbar">
+    <!-- === Banner heurístico del transport degraded ===
+         Visible solo si el setting claudeOrchestrator.showTransportState
+         está activo Y el bridge marcó transportState='degraded' (un
+         wait_for_agents lleva >60s sin resolver). El user lo lee y
+         decide: re-invocar wait_for_agents desde el chat (la idempotency
+         del server recoge el waiter existente) o cancelar manual. -->
+    <div v-if="showTransportBanner" class="transport-banner" role="status">
+      <i class="codicon codicon-warning" />
+      <span class="banner-text">
+        Transport may be slow — agents still running. Re-invoke
+        <code>wait_for_agents</code> from chat to resume the long-poll.
+      </span>
+    </div>
+
     <!-- === Title row + scan label + 3 botones === -->
     <div class="title-row">
       <span class="title">CLAUDE AGENTS</span>
@@ -299,5 +326,34 @@ const contextInfo = computed<ContextInfo | null>(() => {
   font-size: 11px;
   color: var(--foreground-muted);
   flex-shrink: 0;
+}
+
+/* === Transport degraded banner ===
+ * Hereda --color-warning del theme (mapeado a vscode-editorWarning-foreground)
+ * para que se adapte light / high-contrast / custom themes. `color-mix` deja
+ * componer alpha sobre el token sin pisarlo (Tailwind v4 no permite el
+ * `rgb(var(--...) / a)` shorthand). */
+.transport-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 35%, transparent);
+  color: var(--color-warning);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.transport-banner .codicon {
+  font-size: 14px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.banner-text code {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  padding: 0 3px;
+  background: rgb(0 0 0 / 0.2);
+  border-radius: 2px;
 }
 </style>
