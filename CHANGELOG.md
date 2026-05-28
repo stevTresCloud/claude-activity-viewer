@@ -4,6 +4,78 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-28
+
+Second v0.2 milestone — **Mecanismo D + A safety net**. Closes ticket #1 of the v0.2 backlog, driven by `research/VERIFICATION_MECHANISMS.md` (incident pattern observed during portforward v16→v19: 1 silent assertion flip + 1 SQL column from a stale schema that survived the agent's self-reported success criteria). The two mechanisms work as one unit: D forces the agent to declare decisions/uncertainties in a structured exit JSON; A spawns a Haiku critic post-fan-in that reviews the actual diff and flags what the agent omitted.
+
+### Added
+
+#### Mecanismo D — Structured exit (parse + auto-promote)
+
+- New `claudeOrchestrator.verification` setting: `'none' | 'structured' | 'critic' | 'both' | 'human-review'`. Default `'structured'` (D-only at zero runtime cost). `'human-review'` accepted for forward-compat but behaves identical to `'both'` in v0.2.0 — the modal pause panel is roadmapped for v0.2.1+.
+- The bridge appends an exit-schema instruction block to every prompt when verification mode requires it (`structured` / `both` / `human-review`). The instruction asks the agent to emit a fenced JSON block at the end with `status / files_changed / evidence_run / decisions_made_without_consultation / uncertainties` plus 4 anti-rationalization rules (e.g. "self-rationalizing the decision as 'obviously correct' does not exempt you").
+- New helper module `src/runtime/exit-schema.ts` with `EXIT_SCHEMA_V1` (Zod), `parseExitSchema(text)` (tolerant: handles last-fence-wins, plain fence, bare object fallback, 2 MB truncate), and `buildExitSchemaInstruction()` for the prompt block.
+- Bridge promotes status `done` → `needs_review` when the agent declared `decisions_made_without_consultation` OR `uncertainties` non-empty. Emits `agent_status_changed` with `metadata.verificationPromoted: true` so the UI updates immediately.
+
+#### Mecanismo A — Critic Haiku post-fan-in
+
+- After `wait_for_agents` resolves (and the wait did NOT time out), the bridge spawns one Haiku critic per terminal agent whose verificationMode is `critic` / `both` / `human-review`. Critics run in parallel via `Promise.all` and each receives the original agent's snapshot + exit report + a captured working-tree diff.
+- Critic toolset is allow-listed: `['Read', 'Bash', 'Grep', 'Glob']` (no `Write` / `Edit` / `NotebookEdit`). Allow-list enforced via new optional `AgentRunConfig.tools: string[]` field consumed by `agent-runner.ts` when present (overrides the default `preset: 'claude_code'`).
+- Critic prompt (`buildCriticPrompt` in `exit-schema.ts`) instructs the critic on what to flag (assertion flips, SQL referencing unvalidated columns, tests replaced rather than added, silent removals of guards) AND **what NOT to flag** (purely additive helpers, empty `evidence_run` for trivial additions, style suggestions, speculative future risks). The "what NOT to flag" block was added after a smoke E2E showed the critic was over-eager on benign tasks — calibration brings critic costs from ~$0.06 to ~$0.03 per agent on additive changes.
+- Diff capture: `captureCriticDiff(cwd, headBefore)` is async (manual `new Promise` wrap over `child_process.execFile`, not `util.promisify` — promisify depends on a Node-internal symbol that mocks lack). Runs `git diff <headBefore>` (working tree vs commit, **not** `<headBefore>..HEAD` — the latter would always be empty because Claude agents don't commit, only mutate working tree). Truncated to 500 KB with explicit suffix when over.
+- Critic timeout: 90s `AbortController`. On timeout, a synthetic `{severity: 'low', summary: 'critic_timeout'}` flag is added to `critic_findings` for diagnostic visibility but does NOT promote — synthetic low-severity flags from infra failures (`critic_timeout`, `critic_no_output`, `critic_invalid_json`, `critic_schema_violation`, `critic_runner_error`) are filtered out of the promotion logic. Only `high` / `med` severity flags (real findings from Haiku) cause promotion.
+- `headBefore` captured at spawn via `readGitHead(cwd)` (new exported helper, same shape as `readGitBranch` but for `git rev-parse HEAD`).
+
+#### New wire types
+
+- `AgentStatus` extended with `'needs_review'` as a 5th terminal state. Centralized via new exported constant `TERMINAL_STATUSES` + predicate `isTerminalStatus(s)` — SSoT for the bridge `emitStatusChange` invariant, the store `recent` filter, and `runWait` pending detection. Adding a future terminal state (e.g. `'rejected'`) only requires extending the constant.
+- `WaitForAgentsAgentResult.verification?: VerificationReport` — new optional block in the MCP wire-out, contains: `mode`, `exit_report?` (if D parsed successfully), `exit_parse_reason?` (stable code: `no_input | no_json_block | invalid_json | schema_violation`), `critic_findings?: CriticFinding[]`, `critic_cost_usd?`, `critic_duration_ms?`, `auto_promoted_reason?` (string: `'decisions'` / `'uncertainties'` / `'critic_flags'` / `'decisions+critic_flags'` etc.).
+- `AgentSnapshot` extended with 3 verification-UI fields: `verificationMode?`, `verificationReviewed?`, `verificationPromoted?` — drive the new badge in `AgentCardRecent`.
+
+#### Verification badge UI
+
+- New atom `src/webview/components/atoms/VerificationBadge.vue` rendered inline in `AgentCardRecent`. 3 variants:
+  - `verifying…` (italic, gray-muted) — shown while the critic is running post-wait.
+  - `✓ Haiku OK` (green) — verification ran, no promotion.
+  - `⚠ Flagged` (orange) — D auto-promoted (decisions/uncertainties) OR A emitted real flags.
+- `AgentCardRecent` also gained:
+  - `'needs_review'` entry in `STATUS_PRESENTATION` (orange stripe + `codicon-eye` icon).
+  - `needs_review` joins the `done` branch in the meta formatter (shows tokens + cost since the agent did billable work).
+- `useAgentsStore.recent` filter uses `isTerminalStatus(a.status)` so `needs_review` agents land in the RECENT section.
+
+#### Structured verification log
+
+- Every verification event emits a JSON-parseable log line to the `Claude Orchestrator` Output channel:
+  ```
+  [HH:MM:SS] [verification] {"event":"parse"|"critic_spawn"|"critic_done"|"critic_error"|"promote", ...}
+  ```
+  Enables post-mortem inspection of the D/A flow without instrumenting external analytics.
+
+### Fixed
+
+- **Working-tree diff bug**: `captureCriticDiff` initially invoked `git diff <headBefore>..HEAD` which compares two commits. Since Claude agents mutate working tree without committing, HEAD never moved and the diff was always empty — the critic Haiku effectively saw nothing. Switched to `git diff <headBefore>` which compares working tree to commit. Exposed by smoke E2E "happy path" run that showed `critic_findings: []` with anomalously high critic cost; verified by adversarial smoke that now produces 4 concrete findings for an `assertTrue → assertFalse` flip.
+- **Synthetic-low flags caused false positives**: the original promotion logic was "any finding promotes". Combined with synthetic flags from parser fallbacks (`'critic output violated schema'` etc.), benign agents were incorrectly promoted to `needs_review`. Promotion now filters to `severity in ('high' | 'med')` only. Synthetic infra flags remain visible in `critic_findings` for diagnostic purposes.
+- **`emitStatusChange` invariant gap**: the "once terminal, never back to running" guard checked only `done / failed / cancelled` literally — adding `needs_review` exposed the latent drift risk (a late SDK event could overwrite `needs_review` back to `running`). Migrated to `isTerminalStatus()` so the guard auto-extends for future terminal states.
+
+### Changed
+
+- `runWait` (private, in `bridge.ts`) is now async and orchestrates 4 steps: wait-for-terminal listener → eager D-parse per agent → critic spawn (parallel) → mark verificationReviewed → buildWaitResult. The previous synchronous structure remains for the cheap path (all agents already terminal at call time), now unified inside `runWait`.
+- `captureCriticDiff` returns `Promise<{diff, truncated}>` (was synchronous). The async form ensures the N parallel critic spawns in `runCriticsForBatch` don't block the event loop on `execFileSync`, which silently serialized the parallel `Promise.all` despite the wrapper. Real savings on heavy batches: ~0.8–3.2s per fan-in with N ≥ 5 critics.
+- `parseExitForStored` now calls `schedulePersist()` after mutating `stored.exitReport` / `stored.exitParseReason` — aligns with the existing invariant that every state mutation in `bridge.ts` is durable across reloads.
+
+### Tests
+
+- +24 in `src/runtime/__tests__/exit-schema.test.ts`: `parseExitSchema` happy + 4 failure modes + truncate + extra fields tolerance + last-match-wins; `parseCriticOutput` happy + 4 synthetic fallbacks; `buildCriticPrompt` + `buildExitSchemaInstruction` content assertions; `CRITIC_TOOL_ALLOWLIST` excludes Write/Edit.
+- +24 in `src/dashboard/__tests__/bridge.test.ts` covering: `isTerminalStatus` predicate (4 tests), `readGitHead` + `captureCriticDiff` async (8 tests including no-`..HEAD` regression guard), verification flows (mode `none`/`structured`/`critic`/`both`, lock-at-spawn, invalid setting → default, auto-promote via decisions/uncertainties, critic high/med promotes, synthetic low does NOT promote, critic timeout fallback, snapshot fields, agent_status_changed metadata propagation).
+- Total: **414 tests passing** (was 358 at v0.2.0-pre.1).
+
+### Known issues / deferred to v0.2.1+
+
+- Critic `Bash` tool: the allow-list permits Bash for read-only inspection (`git log`, `grep`, `cat`) but Bash can technically write files via shell redirection. The critic prompt explicitly prohibits write commands. In v0.3+ we plan a SDK-level `read_only` preset.
+- Critic findings vs agent card: the critic Haiku runs as an opaque sub-agent, NOT visible in the dashboard as its own card. The `VerificationBadge` is the only sidebar surface. v0.3+ may surface the critic as its own card with a "discussion thread" relationship to the original agent.
+- `notifyCompletion` toast fires before promotion (e.g. "finished" toast appears for an agent that gets promoted to `needs_review` moments later). UX inconsistency, no functional risk.
+- `auto_promoted_reason` is a `+`-joined string (`'decisions+critic_flags'`). If a future downstream consumer needs structured access, migrating to `string[]` is a breaking wire change deferred to v0.3.
+
 ## [0.2.0-pre.1] — 2026-05-28
 
 First v0.2 milestone — **transport robustness + critical papercuts**. Closes ticket #0 of the v0.2 backlog, driven by `research/V0_1_0_FIELD_REPORT.md` (3 transport drops + 4 papercuts observed in the first productive use on 2026-05-27 night).

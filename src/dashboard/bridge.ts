@@ -30,6 +30,30 @@
 import * as childProcess from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
+
+/**
+ * Wrapper async manual sobre `child_process.execFile`. No usamos
+ * `util.promisify` porque depende del símbolo `util.promisify.custom`
+ * que Node attacha a la función real — los mocks de tests no lo tienen
+ * y la promisify genérica resuelve a `stdout` directo (no
+ * `{stdout, stderr}`), divergiendo entre prod y test. Este wrapper
+ * normaliza ambos paths: resuelve a `string` (stdout) o rechaza con
+ * Error. Lo usa captureCriticDiff para que sus N llamadas dentro del
+ * Promise.all en runCriticsForBatch NO se serialicen por block del
+ * event loop.
+ */
+function execFileAsync(
+  cmd: string,
+  args: string[],
+  opts: { encoding: 'utf-8'; timeout?: number; maxBuffer?: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(cmd, args, opts, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(String(stdout));
+    });
+  });
+}
 import * as vscode from 'vscode';
 import type { AgentRunner } from '../runtime/agent-runner';
 import {
@@ -39,16 +63,30 @@ import {
   type AgentStatus as RuntimeAgentStatus,
   type ModelAlias,
 } from '../runtime/types';
+import {
+  CRITIC_DIFF_MAX_BYTES,
+  CRITIC_TOOL_ALLOWLIST,
+  buildCriticPrompt,
+  buildExitSchemaInstruction,
+  parseCriticOutput,
+  parseExitSchema,
+  type CriticFinding as RuntimeCriticFinding,
+  type ExitReport as RuntimeExitReport,
+} from '../runtime/exit-schema';
 import { logAgentEvent, ts } from '../runtime/log';
 import { capitalize, secondsToMs } from '../shared/format';
 import {
   LOG_RING_MAX,
+  isTerminalStatus,
   type AgentCompletedResult,
   type AgentSnapshot,
   type AgentStatus,
+  type CriticFinding,
   type DashboardEventToWebview,
+  type ExitReport,
   type LogEntry,
   type TransportState,
+  type VerificationReport,
   type WaitForAgentsAgentPending,
   type WaitForAgentsAgentResult,
   type WaitForAgentsResult,
@@ -90,6 +128,54 @@ const WAITER_CACHE_MAX = 32;
  * setting opt-in (`claudeOrchestrator.showTransportState`).
  */
 const TRANSPORT_DEGRADED_THRESHOLD_MS = 60 * 1000;
+
+// === Verification (Mecanismo D + A) ===
+
+/**
+ * Modos del setting `claudeOrchestrator.verification`. SSoT de los
+ * valores aceptados: cualquier otro string del setting cae al default
+ * 'structured' vía guard defensivo en `getVerificationMode`.
+ *
+ * Mapeo conceptual (ver research/VERIFICATION_MECHANISMS.md §3-5):
+ *   - 'none':         comportamiento legacy, sin parseo ni critic.
+ *   - 'structured':   solo D. Costo runtime cero — añade párrafo al
+ *                     prompt + parse del exit JSON al cierre.
+ *   - 'critic':       solo A. Critic Haiku revisa el diff, sin D.
+ *   - 'both':         D + A activos.
+ *   - 'human-review': D + A + (futuro) panel modal para approve/reject.
+ *                     Hoy equivale a 'both' — el panel queda para v0.2.1+.
+ */
+const VERIFICATION_MODES = ['none', 'structured', 'critic', 'both', 'human-review'] as const;
+type VerificationMode = (typeof VERIFICATION_MODES)[number];
+const DEFAULT_VERIFICATION_MODE: VerificationMode = 'structured';
+
+/**
+ * Timeout para cada critic Haiku. Si Haiku no termina en este budget,
+ * abortamos y guardamos un flag artificial 'critic_timeout' en findings.
+ * 90s es generoso: un Haiku revisando un diff de <500 KB típicamente
+ * tarda 15-40s. Más allá indica que el modelo se colgó o la red murió.
+ */
+const CRITIC_TIMEOUT_MS = 90 * 1000;
+
+/**
+ * ¿La modalidad invoca al critic Haiku? D-only ('structured') no lo
+ * invoca; los demás sí (incluso 'human-review' porque el critic alimenta
+ * el panel modal futuro).
+ */
+function modeNeedsCritic(mode: VerificationMode): boolean {
+  return mode === 'critic' || mode === 'both' || mode === 'human-review';
+}
+
+/**
+ * ¿La modalidad incluye el parseo del exit estructurado? Todas menos
+ * 'none' y 'critic'. Decisión: en 'critic' puro NO parseamos porque
+ * el setting indica "no quiero el shape estructurado, solo verificación
+ * post-hoc del diff" — agregar el briefing del exit sería ruido extra
+ * en el prompt sin ganancia.
+ */
+function modeNeedsExitSchema(mode: VerificationMode): boolean {
+  return mode === 'structured' || mode === 'both' || mode === 'human-review';
+}
 
 /**
  * Key estable para el idempotency cache: orden no importa al chat caller
@@ -165,6 +251,56 @@ interface StoredAgent {
    * Independiente de los listeners de wait_for_agents.
    */
   startedAt: number;
+
+  // === Verification (D + A) — Ticket #1 ===
+
+  /**
+   * Modo de verification capturado al spawn. Se lockea acá para que
+   * cambios live del setting NO afecten agentes ya corriendo (un
+   * agente arrancado con 'both' debe verificarse con 'both' aunque
+   * el setting baje a 'none' mid-flight). Undefined en agentes
+   * legacy persistidos antes de 0.2.0 — el flujo trata undefined
+   * como 'none' (sin verification).
+   */
+  verificationMode?: VerificationMode;
+  /**
+   * Snapshot del HEAD git en `cwd` al momento del spawn. Lo usa el
+   * critic para computar `git diff <headBefore>..HEAD`. Undefined
+   * cuando el cwd no es repo git, git no está instalado, o la
+   * versión del bridge persistió antes de 0.2.0.
+   */
+  headBefore?: string;
+  /**
+   * Reporte estructurado del agente parseado al cierre. Vacío
+   * cuando el modo es 'none'/'critic' o cuando parseExitSchema falló.
+   * Vive en el wire `VerificationReport.exit_report`.
+   */
+  exitReport?: RuntimeExitReport;
+  /**
+   * Código de razón cuando `parseExitSchema` falló. Stable string para
+   * métricas (§8 doc). Empty cuando el parseo fue ok o no se intentó.
+   */
+  exitParseReason?: string;
+  /**
+   * Findings del critic Haiku. Vacío cuando el modo no incluye critic
+   * o cuando el critic aún no corrió. Una vez seteado, no se vuelve
+   * a correr el critic para este agente (idempotencia per-agente).
+   */
+  criticFindings?: RuntimeCriticFinding[];
+  /**
+   * Costo billable del critic en USD acumulado. Útil para métricas.
+   */
+  criticCostUsd?: number;
+  /**
+   * Duración del critic en ms (wall-clock). Métrica para §8 doc.
+   */
+  criticDurationMs?: number;
+  /**
+   * Por qué el bridge promovió el status a 'needs_review'. Strings
+   * estables: 'decisions' | 'uncertainties' | 'critic_flags'. Vacío
+   * cuando no hubo promoción (status terminal queda como done/failed/cancelled).
+   */
+  autoPromoteReason?: string;
 }
 
 /** Input para `bridge.spawn`. Conecta MCP handler / palette command. */
@@ -545,6 +681,19 @@ export class DashboardBridge {
     // El badge se sobrescribe con el id real cuando el SDK emita el
     // init message (AgentEvent type='model').
     const requestedModel = input.model ?? this.getDefaultModel();
+
+    // === Verification (Mecanismo D + A) ===
+    // Lectura del setting al MOMENTO del spawn — se lockea para este
+    // agente para que cambios live del setting no descalcen flow.
+    // Captura del HEAD git en cwd para que el critic post-fan-in
+    // pueda computar `git diff <headBefore>..HEAD`. Si cwd no es repo,
+    // headBefore queda undefined y el critic recibe diff vacío.
+    const verificationMode = this.getVerificationMode();
+    const headBefore = readGitHead(input.cwd);
+    const promptWithExit = modeNeedsExitSchema(verificationMode)
+      ? input.prompt + buildExitSchemaInstruction()
+      : input.prompt;
+
     const snapshot: AgentSnapshot = {
       id: agentId,
       name,
@@ -558,16 +707,27 @@ export class DashboardBridge {
       elapsedMs: 0,
       tokensUsed: 0,
       contextUsedPct: 0,
+      // verificationMode lockeado al spawn — sirve para que la card
+      // RECENT renderee el VerificationBadge incluso si el setting
+      // cambia mid-flight. Omitido del snapshot si mode='none' para
+      // que la UI sepa "no había verification activa para este agente"
+      // (legacy compat con agentes pre-0.2.0).
+      ...(verificationMode !== 'none' ? { verificationMode } : {}),
     };
 
     const nowMs = Date.now();
     const stored: StoredAgent = {
       snapshot,
       cwd: input.cwd,
+      // Guardamos el prompt ORIGINAL (sin el exit instruction). El
+      // detail panel y el resume mostraran lo que el caller envió,
+      // no la inyección automática del bridge.
       prompt: input.prompt,
       log: [],
       lastActivityAt: nowMs,
       startedAt: nowMs,
+      verificationMode,
+      headBefore,
     };
     this.agents.set(agentId, stored);
 
@@ -615,7 +775,15 @@ export class DashboardBridge {
     // del setting) al runner. Sin esto, el runner recibe
     // `input.model` undefined y cae a su propio DEFAULT_MODEL,
     // ignorando el setting `claudeOrchestrator.defaultModel`.
-    const resolvedInput: SpawnInput = { ...input, model: requestedModel };
+    //
+    // El prompt incluye el bloque exit-schema cuando verificationMode
+    // lo requiere (modeNeedsExitSchema). El runner es agnóstico —
+    // solo recibe el prompt final.
+    const resolvedInput: SpawnInput = {
+      ...input,
+      model: requestedModel,
+      prompt: promptWithExit,
+    };
     const finished = this.run(agentId, resolvedInput, abort.signal).catch((err) => {
       // Defensivo: el runner ya captura sus errores; solo entraría
       // acá si el dynamic import del SDK falla catastrófico.
@@ -878,22 +1046,22 @@ export class DashboardBridge {
       this.waiterCache.delete(key);
     }
 
-    // === Cheap path: todos los agent_ids ya terminales (o inexistentes) ===
-    // No vale la pena cachear ni listener — retorno inmediato sin timer.
+    // Pre-compute pending set para que runWait pueda decidir si arrancar
+    // listener o saltar al critic spawn directo. Mantenemos `'needs_review'`
+    // entre los terminales (es un done promovido — no implica que vayamos
+    // a re-esperar). Igual decisión para 'failed' y 'cancelled'. La SSoT
+    // de qué cuenta como terminal vive en `isTerminalStatus`.
     const pendingSet = new Set<string>();
     for (const id of agentIds) {
       const stored = this.agents.get(id);
       if (!stored) continue;
-      const s = stored.snapshot.status;
-      if (s !== 'done' && s !== 'failed' && s !== 'cancelled') {
-        pendingSet.add(id);
-      }
-    }
-    if (pendingSet.size === 0) {
-      return Promise.resolve(this.buildWaitResult(agentIds, stuckThresholdMs, false));
+      if (!isTerminalStatus(stored.snapshot.status)) pendingSet.add(id);
     }
 
-    // === Long-poll con caching ===
+    // === Long-poll con caching (unificado) ===
+    // Eliminamos el cheap path inline porque runWait ahora cubre tanto
+    // pendingSet vacío (skipea el listener+timer) como el flow del critic
+    // post-fan-in. Mantener una sola ruta simplifica reasoning + caching.
     const promise = this.runWait(agentIds, timeoutMs, stuckThresholdMs, pendingSet);
 
     // LRU eviction FIFO al pasar el cap: descarta el entry más viejo del
@@ -976,31 +1144,327 @@ export class DashboardBridge {
   }
 
   /**
-   * Ejecuta el long-poll event-driven. Helper extraído de `waitForAgents`
-   * para que el flujo de cache (cheap path, fan-in, eviction) quede claro
-   * y el await del listener+timer viva en un solo lugar. Resuelve
-   * directamente con el WaitForAgentsResult en ambos paths (no boolean
-   * intermedio + .then) — menos microtask hops, sin Promise wrapping.
+   * Ejecuta el long-poll event-driven + post-procesa con D + A según
+   * el `verificationMode` de cada agente terminal. Helper extraído de
+   * `waitForAgents` para que el flujo de cache quede separado del
+   * orquestamiento de verification.
+   *
+   * Steps:
+   *   1. Wait-for-terminal: si `pendingSet.size === 0` (cheap path),
+   *      skipea listener + timer. Else suscribe a onAgentCompleted +
+   *      arma timeout.
+   *   2. Eager D-parse: para cada agente terminal con modeNeedsExitSchema,
+   *      parsea el exit del lastAssistantMessage. Auto-promoción a
+   *      'needs_review' si decisions/uncertainties no vacíos. Idempotente
+   *      por `stored.exitReport` ya seteado.
+   *   3. Critic spawn (solo si !timedOut): para agentes con modeNeedsCritic
+   *      y sin critic previo, spawn N critics Haiku paralelos con diff.
+   *      Cada finding promueve a 'needs_review'.
+   *   4. Build wire result con el bloque verification.
+   *
+   * Cuando `timedOut`, saltamos critics (los agentes pueden seguir
+   * corriendo — el wire-out reporta `pending`). El próximo wait
+   * post-terminal ejecutará la verification.
    */
-  private runWait(
+  private async runWait(
     agentIds: string[],
     timeoutMs: number,
     stuckThresholdMs: number,
     pendingSet: Set<string>,
   ): Promise<WaitForAgentsResult> {
-    return new Promise<WaitForAgentsResult>((resolve) => {
+    // === Step 1: Wait-for-terminal ===
+    const timedOut =
+      pendingSet.size === 0
+        ? false
+        : await this.waitForAllTerminal(pendingSet, timeoutMs);
+
+    // === Step 2: Eager D-parse para cada agente terminal ===
+    for (const id of agentIds) {
+      const stored = this.agents.get(id);
+      if (!stored) continue;
+      this.parseExitForStored(stored);
+    }
+
+    // === Step 3: Critic spawn (solo si no timed out) ===
+    if (!timedOut) {
+      await this.runCriticsForBatch(agentIds);
+    }
+
+    // === Step 4: Marcar verificationReviewed en cada agente terminal ===
+    // Una vez que D + A corrieron, los agentes con verificationMode lockeado
+    // pasan a `reviewed=true`. La UI usa este flag para renderear el badge
+    // verde (OK) u naranja (FLAGGED, derivable de verificationPromoted).
+    // No corremos si timedOut: aún hay agentes en flight y no queremos
+    // marcar reviewed a algo que aún no terminó.
+    if (!timedOut) {
+      for (const id of agentIds) {
+        const stored = this.agents.get(id);
+        if (!stored) continue;
+        const mode = stored.verificationMode;
+        if (!mode || mode === 'none') continue;
+        if (stored.snapshot.verificationReviewed) continue;
+        stored.snapshot.verificationReviewed = true;
+        this.post({
+          type: 'agent_status_changed',
+          agentId: id,
+          status: stored.snapshot.status,
+          metadata: { verificationReviewed: true },
+        });
+      }
+      this.schedulePersist();
+    }
+
+    // === Step 5: Build wire-out result ===
+    return this.buildWaitResult(agentIds, stuckThresholdMs, timedOut);
+  }
+
+  /**
+   * Long-poll primitivo: bloquea hasta que todos los `pendingSet`
+   * terminen o venza el timer. No-op si pendingSet ya está vacío
+   * (el caller skipea cuando puede).
+   *
+   * Devuelve `true` si timed-out (algunos siguen pending), `false`
+   * si todos llegaron a terminal antes del timer.
+   */
+  private waitForAllTerminal(
+    pendingSet: Set<string>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
       const off = this.onAgentCompleted((event) => {
         if (pendingSet.delete(event.agentId) && pendingSet.size === 0) {
           off();
           clearTimeout(timer);
-          resolve(this.buildWaitResult(agentIds, stuckThresholdMs, false));
+          resolve(false);
         }
       });
       const timer = setTimeout(() => {
         off();
-        resolve(this.buildWaitResult(agentIds, stuckThresholdMs, true));
+        resolve(true);
       }, timeoutMs);
     });
+  }
+
+  /**
+   * Parsea el exit estructurado del agente (Mecanismo D). Solo corre
+   * si:
+   *   - El modo de verificación del agente lo requiere
+   *     (modeNeedsExitSchema).
+   *   - No se parseó antes (idempotente: stored.exitReport y
+   *     stored.exitParseReason actúan como guard).
+   *
+   * Aplica auto-promoción a 'needs_review' cuando el reporte trae
+   * decisions/uncertainties no vacíos, y muta `stored.snapshot.status`
+   * + emite agent_status_changed para que la UI refleje el cambio.
+   */
+  private parseExitForStored(stored: StoredAgent): void {
+    const mode = stored.verificationMode ?? 'none';
+    if (!modeNeedsExitSchema(mode)) return;
+    // Idempotencia: si ya parseamos antes (ok o fail), no repetimos.
+    if (stored.exitReport || stored.exitParseReason) return;
+
+    const parsed = parseExitSchema(stored.lastAssistantMessage);
+    if (!parsed.ok) {
+      stored.exitParseReason = parsed.reason;
+      this.channel.appendLine(
+        `[${ts()}] [verification] {"event":"parse","agentId":"${stored.snapshot.id}","ok":false,"reason":"${parsed.reason}"}`,
+      );
+      // Persistimos la razón del parse fail: sin esto, una reload
+      // pierde el state ("se intentó parsear y falló") y se re-parsea
+      // el mismo lastAssistantMessage en la próxima invocación de
+      // wait_for_agents, repitiendo trabajo inútil. La mayoría de las
+      // demás mutaciones del stored ya scheduleean persist; alinear.
+      this.schedulePersist();
+      return;
+    }
+    stored.exitReport = parsed.parsed;
+    this.schedulePersist();
+    this.channel.appendLine(
+      `[${ts()}] [verification] {"event":"parse","agentId":"${stored.snapshot.id}","ok":true,"decisions":${parsed.parsed.decisions_made_without_consultation.length},"uncertainties":${parsed.parsed.uncertainties.length}}`,
+    );
+
+    // Auto-promoción D: si el agente declaró decisions/uncertainties,
+    // promovemos a 'needs_review'. Si ya está promovido (e.g. por critic
+    // de una pasada previa), respetamos el state actual.
+    const hasDecisions = parsed.parsed.decisions_made_without_consultation.length > 0;
+    const hasUncertainties = parsed.parsed.uncertainties.length > 0;
+    if (
+      (hasDecisions || hasUncertainties) &&
+      stored.snapshot.status !== 'needs_review'
+    ) {
+      stored.autoPromoteReason = hasDecisions ? 'decisions' : 'uncertainties';
+      this.promoteToNeedsReview(stored, stored.autoPromoteReason);
+    }
+  }
+
+  /**
+   * Spawnea critics Haiku en paralelo para cada agente terminal del
+   * batch que requiere critic (modeNeedsCritic) y aún no fue revisado
+   * (stored.criticFindings === undefined). Asigna findings y aplica
+   * promoción si algún flag fue encontrado.
+   *
+   * Idempotente: una segunda llamada con los mismos ids no re-spawna
+   * critics ya corridos (el guard `criticFindings === undefined` lo
+   * filtra). Permite fan-in vía idempotency cache sin doble cobro.
+   */
+  private async runCriticsForBatch(agentIds: string[]): Promise<void> {
+    const candidates: Array<{ stored: StoredAgent; id: string }> = [];
+    for (const id of agentIds) {
+      const stored = this.agents.get(id);
+      if (!stored) continue;
+      const mode = stored.verificationMode ?? 'none';
+      if (!modeNeedsCritic(mode)) continue;
+      if (stored.criticFindings !== undefined) continue;
+      candidates.push({ stored, id });
+    }
+    if (candidates.length === 0) return;
+
+    this.channel.appendLine(
+      `[${ts()}] [verification] {"event":"critic_spawn","count":${candidates.length}}`,
+    );
+
+    // Spawn paralelo con Promise.all. Cada critic captura su propio
+    // diff + prompt + ejecuta runner.startAgent(Haiku) con timeout.
+    await Promise.all(
+      candidates.map(({ stored }) => this.runSingleCritic(stored)),
+    );
+  }
+
+  /**
+   * Critic Haiku para UN agente. Captura el diff, arma el prompt, ejecuta
+   * el runner con allow-list Read/Bash/Grep/Glob, parsea el output JSON,
+   * guarda findings + costo en stored, promueve a 'needs_review' si flags.
+   *
+   * No tira: cualquier error del runner queda como flag artificial
+   * `{severity:'low', summary:'critic_runner_error'}` en stored.criticFindings.
+   */
+  private async runSingleCritic(stored: StoredAgent): Promise<void> {
+    const start = Date.now();
+    // captureCriticDiff es async (execFile promisified) para que las N
+    // llamadas paralelas en runCriticsForBatch (via Promise.all) NO se
+    // serialicen por block del event loop. Con execFileSync, N=5 critics
+    // con diffs grandes serializaban 1-4s antes de que cualquier Haiku
+    // call arrancara; con execFile cada fork de git corre concurrente.
+    const { diff, truncated } = await captureCriticDiff(stored.cwd, stored.headBefore);
+
+    const prompt = buildCriticPrompt({
+      agentName: stored.snapshot.name,
+      agentSubtitle: stored.snapshot.subtitle,
+      exitReport: stored.exitReport,
+      diff,
+      diffTruncated: truncated,
+    });
+
+    // Timeout: AbortController disparado por setTimeout. El runner
+    // honra el abort en su loop interno.
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), CRITIC_TIMEOUT_MS);
+
+    let criticOutputText: string | null = null;
+    let criticCostUsd = 0;
+    try {
+      const result = await this.runner.startAgent({
+        prompt,
+        cwd: stored.cwd,
+        model: 'haiku',
+        tools: CRITIC_TOOL_ALLOWLIST,
+        abortSignal: abort.signal,
+        // Critic events NO van al log streaming del agente original;
+        // si quisiéramos visibilidad, se podrían guardar en un campo
+        // aparte. Por ahora descartamos (el critic es opaco para la UI).
+        onEvent: () => {},
+      });
+      criticOutputText = result.finalResponse;
+      criticCostUsd = result.costUsd;
+    } catch (err) {
+      this.channel.appendLine(
+        `[${ts()}] [verification] {"event":"critic_error","agentId":"${stored.snapshot.id}","error":"${err instanceof Error ? err.message : String(err)}"}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const durationMs = Date.now() - start;
+    stored.criticDurationMs = durationMs;
+    stored.criticCostUsd = criticCostUsd;
+
+    // Orden defensivo: si hay output válido, usalo aunque el abort haya
+    // disparado (race rara — el critic completó justo antes del timeout;
+    // discardear ese resultado sería falso positivo critic_timeout).
+    // Solo si no hay output: aborted → timeout; else → runner_error.
+    let findings: RuntimeCriticFinding[];
+    if (criticOutputText !== null) {
+      findings = parseCriticOutput(criticOutputText).flags;
+    } else if (abort.signal.aborted) {
+      findings = [{ severity: 'low', summary: 'critic_timeout' }];
+    } else {
+      findings = [{ severity: 'low', summary: 'critic_runner_error' }];
+    }
+    stored.criticFindings = findings;
+
+    this.channel.appendLine(
+      `[${ts()}] [verification] {"event":"critic_done","agentId":"${stored.snapshot.id}","flagsCount":${findings.length},"costUsd":${criticCostUsd},"durationMs":${durationMs}}`,
+    );
+
+    // Promoción por critic: solo cuando hay 1+ flag de severidad
+    // 'high' o 'med'. Las severidades 'low' NO promueven porque
+    // las usamos para flags sintéticos del propio parser/runner del
+    // critic (`critic_timeout`, `critic_no_output`, `critic_invalid_json`,
+    // `critic_schema_violation`, `critic_runner_error`) que indican
+    // "el critic no pudo verificar bien", NO "el agente hizo algo mal".
+    // Esos flags quedan visibles en `critic_findings` del wire-out
+    // para que el operador los vea, pero no disparan needs_review.
+    //
+    // Si en el futuro un real finding de Haiku usa 'low' por estilo,
+    // se introduce un campo `kind: 'synthetic' | 'real'` aparte y se
+    // promueve por kind=real, no por severity. Por ahora la heurística
+    // de severity es suficiente y simple.
+    const promotingFindings = findings.filter(
+      (f) => f.severity === 'high' || f.severity === 'med',
+    );
+    if (promotingFindings.length > 0) {
+      const existing = stored.autoPromoteReason;
+      let nextReason: string;
+      if (!existing) {
+        nextReason = 'critic_flags';
+      } else if (!existing.includes('critic_flags')) {
+        nextReason = `${existing}+critic_flags`;
+      } else {
+        nextReason = existing;
+      }
+      stored.autoPromoteReason = nextReason;
+      this.promoteToNeedsReview(stored, nextReason);
+    }
+  }
+
+  /**
+   * Promueve el snapshot.status a `'needs_review'` y emite el evento
+   * de cambio al webview. Idempotente: si ya está promovido, no-op
+   * (excepto persist).
+   */
+  private promoteToNeedsReview(stored: StoredAgent, reason: string): void {
+    if (stored.snapshot.status === 'needs_review') {
+      // Idempotente para status, pero el flag UI puede no haberse
+      // seteado todavía en caso de second-call (critic promueve sobre
+      // un D ya promovido). Aseguramos invariante: si está promoted en
+      // status, también lo está como flag.
+      if (!stored.snapshot.verificationPromoted) {
+        stored.snapshot.verificationPromoted = true;
+      }
+      return;
+    }
+    stored.snapshot.status = 'needs_review';
+    stored.snapshot.verificationPromoted = true;
+    this.channel.appendLine(
+      `[${ts()}] [verification] {"event":"promote","agentId":"${stored.snapshot.id}","reason":"${reason}"}`,
+    );
+    this.post({
+      type: 'agent_status_changed',
+      agentId: stored.snapshot.id,
+      status: 'needs_review',
+      metadata: { status: 'needs_review', verificationPromoted: true },
+    });
+    this.schedulePersist();
   }
 
   /**
@@ -1034,9 +1498,10 @@ export class DashboardBridge {
         continue;
       }
       const status = stored.snapshot.status;
-      if (status === 'done' || status === 'failed' || status === 'cancelled') {
+      if (isTerminalStatus(status)) {
         const snap = stored.snapshot;
-        results.push({
+        const verification = this.buildVerificationReport(stored);
+        const result: WaitForAgentsAgentResult = {
           agent_id: id,
           status,
           last_message: stored.lastAssistantMessage ?? null,
@@ -1045,7 +1510,11 @@ export class DashboardBridge {
           cost_usd: snap.costUsd ?? 0,
           model: snap.model,
           reason: snap.reason,
-        });
+        };
+        if (verification) {
+          result.verification = verification;
+        }
+        results.push(result);
       } else {
         // 'running' o 'pending' — para el wait, ambos van a pending
         // del wire. El caller no distingue "todavía no arrancó" vs
@@ -1346,12 +1815,11 @@ export class DashboardBridge {
       // un AgentEvent llega tarde (race entre el bloque terminal
       // del run() y los últimos eventos del SDK), no degradamos
       // el status. Igual mergeamos metadata útil (sessionId/model)
-      // — eso sí mantiene info válida.
-      const isTerminal =
-        stored.snapshot.status === 'done' ||
-        stored.snapshot.status === 'failed' ||
-        stored.snapshot.status === 'cancelled';
-      if (!isTerminal) {
+      // — eso sí mantiene info válida. `isTerminalStatus` cubre
+      // done/failed/cancelled/needs_review como SSoT — sin esto, un
+      // status nuevo agregado a AgentStatus quedaba fuera del check
+      // y permitía sobrescritura silenciosa.
+      if (!isTerminalStatus(stored.snapshot.status)) {
         stored.snapshot.status = status;
       }
       if (metadata) {
@@ -1506,8 +1974,78 @@ export class DashboardBridge {
     return Array.from(this.agents.values()).map((s) => ({ ...s.snapshot }));
   }
 
+  /**
+   * Arma el bloque wire `VerificationReport` para un agente. Solo retorna
+   * algo si el modo del agente NO es 'none'; sin eso, el wire-out de
+   * agentes pre-0.2.0 (que no llevan verificationMode) y agentes con
+   * mode='none' queda sin ese campo opcional — backwards-compat.
+   *
+   * Los sub-campos son condicionales:
+   *   - exit_report y exit_parse_reason: solo cuando modeNeedsExitSchema.
+   *   - critic_findings / cost / duration: solo cuando modeNeedsCritic.
+   *   - auto_promoted_reason: cuando el bridge promovió a needs_review.
+   */
+  private buildVerificationReport(stored: StoredAgent): VerificationReport | null {
+    const mode = stored.verificationMode;
+    if (!mode || mode === 'none') return null;
+
+    const report: VerificationReport = { mode };
+    if (modeNeedsExitSchema(mode)) {
+      if (stored.exitReport) {
+        // Copia shallow del runtime ExitReport al wire ExitReport.
+        // Mismo shape — el tipo wire solo lista los 5 campos
+        // canónicos (sin `passthrough` runtime). Filtramos extras.
+        const e = stored.exitReport;
+        const wireExit: ExitReport = {
+          status: e.status,
+          files_changed: e.files_changed,
+          evidence_run: e.evidence_run,
+          decisions_made_without_consultation: e.decisions_made_without_consultation,
+          uncertainties: e.uncertainties,
+        };
+        report.exit_report = wireExit;
+      } else if (stored.exitParseReason) {
+        report.exit_parse_reason = stored.exitParseReason;
+      }
+    }
+    if (modeNeedsCritic(mode) && stored.criticFindings !== undefined) {
+      // Copia shallow de cada finding (mismo shape runtime → wire).
+      const wireFindings: CriticFinding[] = stored.criticFindings.map((f) => ({
+        file: f.file,
+        line: f.line,
+        severity: f.severity,
+        summary: f.summary,
+      }));
+      report.critic_findings = wireFindings;
+      if (typeof stored.criticCostUsd === 'number') {
+        report.critic_cost_usd = stored.criticCostUsd;
+      }
+      if (typeof stored.criticDurationMs === 'number') {
+        report.critic_duration_ms = stored.criticDurationMs;
+      }
+    }
+    if (stored.autoPromoteReason) {
+      report.auto_promoted_reason = stored.autoPromoteReason;
+    }
+    return report;
+  }
+
   private makeAgentId(): string {
     return crypto.randomUUID();
+  }
+
+  /**
+   * Lee `claudeOrchestrator.verification` con validación defensiva.
+   * Cualquier string fuera del enum cae a DEFAULT_VERIFICATION_MODE
+   * ('structured'). Lo lee el spawn() para lockear el modo de cada
+   * agente al momento de su creación.
+   */
+  private getVerificationMode(): VerificationMode {
+    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const raw = cfg.get<string>('verification', DEFAULT_VERIFICATION_MODE);
+    return (VERIFICATION_MODES as readonly string[]).includes(raw)
+      ? (raw as VerificationMode)
+      : DEFAULT_VERIFICATION_MODE;
   }
 
   private getProjectsRoot(): string[] {
@@ -1950,4 +2488,96 @@ function readGitBranch(cwd: string): string {
     // No es git repo / git no instalado / cwd inexistente — fallback vacío.
     return '';
   }
+}
+
+/**
+ * Snapshot del HEAD git en `cwd` para que el critic post-fan-in pueda
+ * computar `git diff <headBefore>..HEAD`. Retorna undefined si:
+ *   - El cwd no es un repo git.
+ *   - Git no está instalado.
+ *   - El repo está vacío (sin commits).
+ * En esos casos, el critic recibe un diff vacío y normalmente reporta
+ * `summary: 'no diff'` con flags vacíos.
+ *
+ * Exportable y puro (solo lee filesystem) — los tests del bridge lo
+ * mockean para verificar el flow sin necesidad de repo git real.
+ */
+export function readGitHead(cwd: string): string | undefined {
+  try {
+    const out = childProcess.execFileSync(
+      'git',
+      ['-C', cwd, 'rev-parse', 'HEAD'],
+      {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+      },
+    );
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Captura el diff `<headBefore>` working-tree vs commit desde `cwd`.
+ * Truncado a CRITIC_DIFF_MAX_BYTES si supera; el caller flaggea al
+ * critic en el prompt (buildCriticPrompt acepta `diffTruncated: boolean`).
+ *
+ * Retorna `{diff: '', truncated: false}` si:
+ *   - headBefore es undefined (cwd no era repo al spawn).
+ *   - git diff falla (HEAD no resoluble, repo corrupto).
+ *
+ * No tira en ninguna rama. **Async** (execFile promisified) para que el
+ * Promise.all en runCriticsForBatch realmente paralelice los N forks de
+ * git — con execFileSync los forks bloqueaban el event loop y se
+ * serializaban a pesar del Promise.all wrapper.
+ *
+ * Exportable para tests.
+ */
+export async function captureCriticDiff(
+  cwd: string,
+  headBefore: string | undefined,
+): Promise<{ diff: string; truncated: boolean }> {
+  if (!headBefore) {
+    return { diff: '', truncated: false };
+  }
+  let out = '';
+  try {
+    // `git diff <commit>` compara WORKING TREE vs commit dado. Esto es
+    // crítico para el critic: el agente Claude modifica archivos pero
+    // NO los commitea, así que HEAD no se mueve entre spawn y close.
+    // Si usaramos `git diff <headBefore>..HEAD` (comparación entre dos
+    // commits), el diff sería siempre vacío y el critic no vería los
+    // cambios reales del agente — silent failure de Mecanismo A.
+    //
+    // Para incluir también archivos staged que el agente pudo haber
+    // `git add`-eado sin commitear, `git diff <commit>` ya incluye
+    // staged+working (es el "diff total respecto del commit"). NO
+    // incluye archivos NUEVOS sin track — el critic los pierde, pero
+    // los archivos nuevos suelen ser cambios menos ambiguos (más
+    // obvios al review humano post-fan-in) y el caso típico del Mecanismo
+    // A es atrapar flips/refactors silenciosos en archivos existentes.
+    out = await execFileAsync(
+      'git',
+      ['-C', cwd, 'diff', headBefore],
+      {
+        encoding: 'utf-8',
+        // 5s es un buen balance: diffs grandes (10-50 MB) toman 1-2s
+        // en discos lentos. Más allá indica un repo patológico.
+        timeout: 5000,
+        // maxBuffer default es 1 MB. Subimos a 10 MB para no recortar
+        // diffs grandes ANTES de nuestro truncate canonical de 500 KB.
+        // El truncate canonical se aplica abajo.
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    );
+  } catch {
+    return { diff: '', truncated: false };
+  }
+  if (out.length <= CRITIC_DIFF_MAX_BYTES) {
+    return { diff: out, truncated: false };
+  }
+  return { diff: out.slice(0, CRITIC_DIFF_MAX_BYTES), truncated: true };
 }

@@ -36,16 +36,37 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // para tests que no se enfocan en branch.
 vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(() => ''),
+  // execFile async para captureCriticDiff (promisify(execFile)). El
+  // mock acepta el callback firmado por util.promisify: (err, stdout, stderr).
+  // Tests configuran retornos via mockImplementationOnce.
+  execFile: vi.fn(
+    (
+      _cmd: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (err: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      cb(null, '', '');
+    },
+  ),
 }));
 
+import * as childProcess from 'node:child_process';
 import {
   DashboardBridge,
+  captureCriticDiff,
   deriveProjectContext,
   deriveProjectContextPure,
   derivePathFromPrompt,
   prettyModel,
+  readGitHead,
   runtimeToWireStatus,
 } from '../bridge';
+import {
+  TERMINAL_STATUSES,
+  isTerminalStatus,
+  type AgentStatus,
+} from '../../shared/dashboard-protocol';
 import type {
   AgentRunConfig,
   AgentResult,
@@ -79,40 +100,80 @@ import { makeContext, makeOutputChannel } from './_fixtures';
  * real y permite al test controlar el timing exacto.
  */
 class FakeAgentRunner {
-  public lastConfig: AgentRunConfig | undefined;
+  /**
+   * Configs de TODAS las invocaciones a startAgent, en orden de llegada.
+   * El test de verification (Mecanismo A) hace que el bridge invoque
+   * startAgent una vez por agente original + una vez por critic Haiku;
+   * el array preserva ambas para que el test pueda emitir/finalizar a
+   * cada una individualmente.
+   */
+  public readonly configs: AgentRunConfig[] = [];
   public readonly abortSignals: AbortSignal[] = [];
-  private resolver: ((r: AgentResult) => void) | undefined;
+  /**
+   * Resolvers FIFO. `finish()` sin index resuelve el más viejo no
+   * resuelto (semántica preservada de la versión single-call: cuando
+   * solo hay 1 startAgent en vuelo, FIFO == LIFO == el único).
+   */
+  private readonly resolvers: Array<(r: AgentResult) => void> = [];
+
+  /** Backwards-compat con tests pre-verification: la última config recibida. */
+  get lastConfig(): AgentRunConfig | undefined {
+    return this.configs[this.configs.length - 1];
+  }
 
   startAgent(config: AgentRunConfig): Promise<AgentResult> {
-    this.lastConfig = config;
+    this.configs.push(config);
     this.abortSignals.push(config.abortSignal);
     return new Promise<AgentResult>((resolve) => {
-      this.resolver = resolve;
+      this.resolvers.push(resolve);
     });
   }
 
+  /** Emite un evento al startAgent más reciente. */
   emit(event: AgentEvent): void {
-    if (!this.lastConfig) throw new Error('startAgent no fue llamado todavía');
-    this.lastConfig.onEvent(event);
+    const last = this.lastConfig;
+    if (!last) throw new Error('startAgent no fue llamado todavía');
+    last.onEvent(event);
   }
 
-  finish(partial: Partial<AgentResult> = {}): void {
-    if (!this.resolver) throw new Error('No hay resolver activo');
-    const result: AgentResult = {
-      status: 'completed',
-      finalResponse: null,
-      toolCallCount: 0,
-      durationMs: 1000,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      costUsd: 0,
-      ...partial,
-    };
-    this.resolver(result);
-    this.resolver = undefined;
+  /** Emite un evento a un startAgent específico por índice. */
+  emitAt(index: number, event: AgentEvent): void {
+    const cfg = this.configs[index];
+    if (!cfg) throw new Error(`No hay config en index ${index}`);
+    cfg.onEvent(event);
   }
+
+  /** Resuelve el resolver FIFO (más viejo no resuelto). */
+  finish(partial: Partial<AgentResult> = {}): void {
+    const resolver = this.resolvers.shift();
+    if (!resolver) throw new Error('No hay resolver activo');
+    resolver(buildAgentResult(partial));
+  }
+
+  /** Resuelve un resolver por posición en el array (no muta el orden FIFO). */
+  finishAt(index: number, partial: Partial<AgentResult> = {}): void {
+    const resolver = this.resolvers[index];
+    if (!resolver) throw new Error(`No hay resolver en index ${index}`);
+    resolver(buildAgentResult(partial));
+    // Marcamos consumed con un noop para mantener el shape del array
+    // (los tests pueden seguir referenciando indices estables).
+    this.resolvers[index] = () => {};
+  }
+}
+
+function buildAgentResult(partial: Partial<AgentResult>): AgentResult {
+  return {
+    status: 'completed',
+    finalResponse: null,
+    toolCallCount: 0,
+    durationMs: 1000,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    costUsd: 0,
+    ...partial,
+  };
 }
 
 interface StoredAgentLike {
@@ -164,6 +225,31 @@ function emitUsage(runner: FakeAgentRunner, inputTokens: number, outputTokens: n
 // =====================================================================
 // === runtimeToWireStatus =============================================
 // =====================================================================
+
+describe('isTerminalStatus (SSoT for terminal status detection)', () => {
+  it('cubre los 4 estados terminales del enum', () => {
+    expect(TERMINAL_STATUSES).toEqual(['done', 'failed', 'cancelled', 'needs_review']);
+  });
+
+  it('done / failed / cancelled / needs_review → true', () => {
+    expect(isTerminalStatus('done')).toBe(true);
+    expect(isTerminalStatus('failed')).toBe(true);
+    expect(isTerminalStatus('cancelled')).toBe(true);
+    expect(isTerminalStatus('needs_review')).toBe(true);
+  });
+
+  it('running / pending → false', () => {
+    expect(isTerminalStatus('running')).toBe(false);
+    expect(isTerminalStatus('pending')).toBe(false);
+  });
+
+  it('predicate narrows el tipo al TerminalAgentStatus union', () => {
+    // El narrowing TS: tras isTerminalStatus(s), `s` es del subtipo.
+    // Esto se valida en compile-time por tsc, pero verificamos también
+    // en runtime que el predicado no acepta strings random.
+    expect(isTerminalStatus('unknown' as AgentStatus)).toBe(false);
+  });
+});
 
 describe('runtimeToWireStatus', () => {
   it('mapea running → running', () => {
@@ -2005,6 +2091,656 @@ describe('DashboardBridge — integración', () => {
       const res = bridge.getAgentLog(agentId);
       expect(res?.entries).toHaveLength(3);
       runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+  });
+
+  // ==========================================================================
+  // === git helpers (readGitHead + captureCriticDiff) =======================
+  // ==========================================================================
+  //
+  // Cubren la captura del HEAD al spawn + el diff que recibe el critic.
+  // El bug que motivó el test del diff: usar `<headBefore>..HEAD` deja el
+  // diff vacío porque el agente NO commitea sus cambios, así que HEAD no
+  // se mueve. `git diff <headBefore>` (sin `..HEAD`) compara working tree
+  // vs commit y captura los cambios reales del agente.
+
+  describe('readGitHead', () => {
+    it('retorna el SHA cuando git rev-parse responde con un commit', () => {
+      const spy = vi
+        .mocked(childProcess.execFileSync)
+        .mockReturnValueOnce('abc123def\n' as never);
+      const sha = readGitHead('/repos/p');
+      expect(sha).toBe('abc123def');
+      expect(spy).toHaveBeenCalledWith(
+        'git',
+        ['-C', '/repos/p', 'rev-parse', 'HEAD'],
+        expect.objectContaining({ encoding: 'utf-8' }),
+      );
+    });
+
+    it('retorna undefined cuando git falla (cwd no es repo)', () => {
+      vi.mocked(childProcess.execFileSync).mockImplementationOnce(() => {
+        throw new Error('not a git repo');
+      });
+      expect(readGitHead('/repos/p')).toBeUndefined();
+    });
+
+    it('retorna undefined cuando git devuelve vacío (repo sin commits)', () => {
+      vi.mocked(childProcess.execFileSync).mockReturnValueOnce('\n' as never);
+      expect(readGitHead('/repos/p')).toBeUndefined();
+    });
+  });
+
+  describe('captureCriticDiff', () => {
+    /**
+     * Helper para mockear `execFile` async retornando stdout específico
+     * UN call. El mock del módulo es callback-based (firma util.promisify);
+     * implementOnce invoca el cb con (err, stdout, stderr).
+     */
+    function mockExecFileOnce(
+      stdout: string,
+      err: Error | null = null,
+    ): void {
+      vi.mocked(childProcess.execFile).mockImplementationOnce(
+        ((
+          _cmd: string,
+          _args: string[],
+          _opts: unknown,
+          cb: (e: Error | null, out: string, e2: string) => void,
+        ) => {
+          cb(err, stdout, '');
+          return {} as never;
+        }) as never,
+      );
+    }
+
+    it('headBefore undefined → diff vacío sin invocar git', async () => {
+      const spy = vi.mocked(childProcess.execFile);
+      spy.mockClear();
+      const result = await captureCriticDiff('/repos/p', undefined);
+      expect(result).toEqual({ diff: '', truncated: false });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('compara working tree vs commit con `git diff <headBefore>` (NO `..HEAD`)', async () => {
+      // Bug regression guard: el agente modifica archivos sin commitear,
+      // así que HEAD no se mueve entre spawn y close. Si usáramos
+      // `<headBefore>..HEAD` (entre dos commits), el diff sería SIEMPRE
+      // vacío y el critic no vería los cambios reales. Validamos que
+      // los args del execFile NO incluyan `..HEAD`.
+      const expectedDiff = 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n';
+      const spy = vi.mocked(childProcess.execFile);
+      spy.mockClear();
+      mockExecFileOnce(expectedDiff);
+      const result = await captureCriticDiff('/repos/p', 'cabf15d');
+      expect(result).toEqual({ diff: expectedDiff, truncated: false });
+      const callArgs = spy.mock.calls[spy.mock.calls.length - 1];
+      expect(callArgs[0]).toBe('git');
+      expect(callArgs[1]).toEqual(['-C', '/repos/p', 'diff', 'cabf15d']);
+      const gitArgs = callArgs[1] as string[];
+      expect(gitArgs.some((a) => a.includes('..'))).toBe(false);
+    });
+
+    it('git diff falla → retorna diff vacío sin tirar', async () => {
+      mockExecFileOnce('', new Error('git diff exploded'));
+      const result = await captureCriticDiff('/repos/p', 'abc123');
+      expect(result).toEqual({ diff: '', truncated: false });
+    });
+
+    it('output >500 KB se trunca a 500 KB con flag truncated=true', async () => {
+      const huge = 'x'.repeat(600 * 1024);
+      mockExecFileOnce(huge);
+      const result = await captureCriticDiff('/repos/p', 'abc123');
+      expect(result.diff.length).toBe(500 * 1024);
+      expect(result.truncated).toBe(true);
+    });
+
+    it('output exactamente 500 KB NO se trunca', async () => {
+      const exact = 'x'.repeat(500 * 1024);
+      mockExecFileOnce(exact);
+      const result = await captureCriticDiff('/repos/p', 'abc123');
+      expect(result.diff.length).toBe(500 * 1024);
+      expect(result.truncated).toBe(false);
+    });
+  });
+
+  // ==========================================================================
+  // === verification (Mecanismo D + A) ======================================
+  // ==========================================================================
+
+  describe('verification (Mecanismo D + A)', () => {
+    /**
+     * Helper: emite un text con un JSON block conforme a EXIT_SCHEMA_V1.
+     * Centraliza la fixture para que los tests describan QUÉ del shape
+     * importa (decisions vs uncertainties vs status) sin repetir el
+     * bloque JSON entero.
+     */
+    function emitExitReport(
+      run: FakeAgentRunner,
+      shape: {
+        status?: 'ok' | 'needs_review' | 'failed';
+        files_changed?: string[];
+        evidence_run?: string[];
+        decisions_made_without_consultation?: string[];
+        uncertainties?: string[];
+      },
+    ): void {
+      const payload = {
+        status: shape.status ?? 'ok',
+        files_changed: shape.files_changed ?? [],
+        evidence_run: shape.evidence_run ?? [],
+        decisions_made_without_consultation:
+          shape.decisions_made_without_consultation ?? [],
+        uncertainties: shape.uncertainties ?? [],
+      };
+      run.emit({
+        type: 'text',
+        text: `Listo.\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``,
+      });
+    }
+
+    /**
+     * Helper: emite un text con la salida JSON del critic Haiku.
+     * El bridge espera flags + summary (parseCriticOutput).
+     */
+    function emitCriticOutput(
+      run: FakeAgentRunner,
+      flags: Array<{ severity: 'high' | 'med' | 'low'; summary: string }>,
+    ): void {
+      const payload = { flags, summary: flags.length === 0 ? 'no concerns' : `${flags.length} findings` };
+      run.emit({
+        type: 'text',
+        text: `Revisado.\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``,
+      });
+    }
+
+    it('mode=none: legacy — no inyecta exit instruction, no parsea, no spawnea critic', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'none');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'do X', cwd: '/repos/p' });
+      // El prompt que recibió el runner NO debe incluir el bloque exit-schema.
+      expect(runner.lastConfig?.prompt).toBe('do X');
+      // El agente devuelve texto con JSON pero el bridge no debe parsear.
+      emitExitReport(runner, {
+        status: 'ok',
+        decisions_made_without_consultation: ['flipped X'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100, finalResponse: 'done' });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Una sola startAgent invocada — sin critic spawn.
+      expect(runner.configs).toHaveLength(1);
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification).toBeUndefined();
+    });
+
+    it('mode=structured: inyecta exit instruction y parsea (sin critic)', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'do X', cwd: '/repos/p' });
+      // El prompt que llegó al runner debe contener el briefing exit-schema.
+      expect(runner.lastConfig?.prompt).toContain('Exit report (mandatory)');
+      expect(runner.lastConfig?.prompt).toContain('do X');
+
+      emitExitReport(runner, {
+        status: 'ok',
+        files_changed: ['a.py'],
+        evidence_run: ['ast.parse OK'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Sin critic spawn — solo una startAgent.
+      expect(runner.configs).toHaveLength(1);
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification).toBeDefined();
+      expect(result.results[0].verification?.mode).toBe('structured');
+      expect(result.results[0].verification?.exit_report).toMatchObject({
+        status: 'ok',
+        files_changed: ['a.py'],
+        evidence_run: ['ast.parse OK'],
+      });
+    });
+
+    it('mode=structured + decisions no vacíos → auto-promote a needs_review (reason=decisions)', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'add a test', cwd: '/repos/p' });
+      emitExitReport(runner, {
+        status: 'ok',
+        decisions_made_without_consultation: [
+          'Replaced existing test instead of adding new one',
+        ],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.results[0].status).toBe('needs_review');
+      expect(result.results[0].verification?.auto_promoted_reason).toBe('decisions');
+    });
+
+    it('mode=structured + uncertainties no vacías → auto-promote (reason=uncertainties)', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'port to v19', cwd: '/repos/p' });
+      emitExitReport(runner, {
+        status: 'ok',
+        uncertainties: ['display_name may not exist in v19'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.results[0].status).toBe('needs_review');
+      expect(result.results[0].verification?.auto_promoted_reason).toBe('uncertainties');
+    });
+
+    it('mode=structured + exit malformado → status legacy + exit_parse_reason en wire', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'do X', cwd: '/repos/p' });
+      // Agente legacy / desobediente: sin JSON al final.
+      runner.emit({ type: 'text', text: 'Solo prosa, sin reporte.' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Status queda como 'done' (backwards-compat con agentes legacy).
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification?.exit_parse_reason).toBe('no_json_block');
+      expect(result.results[0].verification?.exit_report).toBeUndefined();
+    });
+
+    it('mode=critic: NO inyecta exit instruction, sí spawnea critic Haiku', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'critic');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'do X', cwd: '/repos/p' });
+      // Sin exit-schema en el prompt.
+      expect(runner.lastConfig?.prompt).toBe('do X');
+      runner.emit({ type: 'text', text: 'Cambié algo.' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Esperamos a que el bridge invoque startAgent para el critic.
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      // El critic debe llamarse con model='haiku' + tools allow-list.
+      const criticCfg = runner.configs[1];
+      expect(criticCfg.model).toBe('haiku');
+      expect(criticCfg.tools).toEqual(['Read', 'Bash', 'Grep', 'Glob']);
+      expect(criticCfg.tools).not.toContain('Write');
+      expect(criticCfg.tools).not.toContain('Edit');
+      // Critic devuelve "no concerns".
+      emitCriticOutput(runner, []);
+      runner.finish({ status: 'completed', durationMs: 50, finalResponse: '```json\n{"flags":[],"summary":"no concerns"}\n```', costUsd: 0.002 });
+
+      const result = await waitPromise;
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification?.mode).toBe('critic');
+      expect(result.results[0].verification?.critic_findings).toEqual([]);
+      expect(result.results[0].verification?.critic_cost_usd).toBeCloseTo(0.002);
+    });
+
+    it('mode=both: critic encuentra flag → promueve a needs_review (reason=critic_flags)', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'both');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'fix test', cwd: '/repos/p' });
+      // Agente honesto sin decisions; reporta OK.
+      emitExitReport(runner, { status: 'ok' });
+      runner.finish({ status: 'completed', durationMs: 100, finalResponse: '```json\n{"status":"ok","files_changed":[],"evidence_run":[],"decisions_made_without_consultation":[],"uncertainties":[]}\n```' });
+      await finished;
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      emitCriticOutput(runner, [
+        { severity: 'high', summary: 'assertion flipped without justification' },
+      ]);
+      runner.finish({
+        status: 'completed',
+        durationMs: 50,
+        finalResponse:
+          '```json\n{"flags":[{"severity":"high","summary":"assertion flipped without justification"}],"summary":"1 high"}\n```',
+      });
+
+      const result = await waitPromise;
+      expect(result.results[0].status).toBe('needs_review');
+      expect(result.results[0].verification?.auto_promoted_reason).toBe('critic_flags');
+      expect(result.results[0].verification?.critic_findings).toHaveLength(1);
+      expect(result.results[0].verification?.critic_findings?.[0].severity).toBe('high');
+    });
+
+    it('mode=both + D y A ambos disparan → autoPromoteReason agrega critic_flags', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'both');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'big change', cwd: '/repos/p' });
+      // Agente declara decisions (D auto-promueve).
+      emitExitReport(runner, {
+        status: 'ok',
+        decisions_made_without_consultation: ['renamed foo()'],
+      });
+      runner.finish({
+        status: 'completed',
+        durationMs: 100,
+        finalResponse:
+          '```json\n{"status":"ok","decisions_made_without_consultation":["renamed foo()"],"uncertainties":[]}\n```',
+      });
+      await finished;
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      emitCriticOutput(runner, [
+        { severity: 'med', summary: 'callers not updated' },
+      ]);
+      runner.finish({
+        status: 'completed',
+        durationMs: 50,
+        finalResponse:
+          '```json\n{"flags":[{"severity":"med","summary":"callers not updated"}],"summary":"1 med"}\n```',
+      });
+
+      const result = await waitPromise;
+      expect(result.results[0].status).toBe('needs_review');
+      // El reason debe incluir AMBOS: 'decisions' + 'critic_flags' por D-first.
+      expect(result.results[0].verification?.auto_promoted_reason).toContain('decisions');
+      expect(result.results[0].verification?.auto_promoted_reason).toContain('critic_flags');
+    });
+
+    it('mode=both: critic NO se vuelve a correr en una segunda waitForAgents (idempotency per-agente)', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'both');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      emitExitReport(runner, { status: 'ok' });
+      runner.finish({
+        status: 'completed',
+        durationMs: 100,
+        finalResponse:
+          '```json\n{"status":"ok","decisions_made_without_consultation":[],"uncertainties":[]}\n```',
+      });
+      await finished;
+
+      const wait1 = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      emitCriticOutput(runner, []);
+      runner.finish({
+        status: 'completed',
+        durationMs: 50,
+        finalResponse: '```json\n{"flags":[],"summary":"no concerns"}\n```',
+      });
+      await wait1;
+
+      // Segunda llamada con DIFERENTE key (no fan-in cache) — para
+      // forzar que runWait corra de nuevo. Verificamos que NO se
+      // dispare un segundo critic spawn.
+      const wait2 = bridge.waitForAgents({
+        agentIds: [agentId, 'other-id'],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      await wait2;
+      // Sigue habiendo solo 2 startAgent calls (original + 1 critic).
+      // No se spawneó un segundo critic para el mismo agentId.
+      expect(runner.configs).toHaveLength(2);
+    });
+
+    it('mode locked at spawn: cambiar setting mid-flight NO afecta agentes ya corriendo', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'A', cwd: '/repos/p' });
+      // Cambiamos el setting MID-FLIGHT.
+      __setConfig('claudeOrchestrator', 'verification', 'none');
+      emitExitReport(runner, {
+        status: 'ok',
+        uncertainties: ['x'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // El agente arrancó con 'structured' — el lock al spawn fuerza
+      // la promoción aunque el setting actual sea 'none'.
+      expect(result.results[0].status).toBe('needs_review');
+      expect(result.results[0].verification?.mode).toBe('structured');
+    });
+
+    it('mode inválido en el setting (ej. "off") cae al default "structured"', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'off-not-an-enum');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'A', cwd: '/repos/p' });
+      // El prompt debe llevar el briefing de exit-schema (porque cayó a 'structured').
+      expect(runner.lastConfig?.prompt).toContain('Exit report (mandatory)');
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const result = await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      expect(result.results[0].verification?.mode).toBe('structured');
+    });
+
+    it('promoción dispara agent_status_changed con status=needs_review al webview', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'A', cwd: '/repos/p' });
+      emitExitReport(runner, {
+        status: 'ok',
+        decisions_made_without_consultation: ['unauthorized rename'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      // El status_changed post-D promotion debería verse en los messages
+      // posteados al webview.
+      await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      const promotions = postedOf(webview, 'agent_status_changed').filter(
+        (e) => e.agentId === agentId && e.status === 'needs_review',
+      );
+      expect(promotions.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('snapshot del agente trae verificationMode al spawn cuando setting ≠ none', () => {
+      __setConfig('claudeOrchestrator', 'verification', 'both');
+      bridge.attachWebview(webview as never);
+      bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      const created = postedOf(webview, 'agent_created');
+      expect(created).toHaveLength(1);
+      expect(created[0].agent.verificationMode).toBe('both');
+      // reviewed/promoted arrancan undefined (no se setean en spawn).
+      expect(created[0].agent.verificationReviewed).toBeUndefined();
+      expect(created[0].agent.verificationPromoted).toBeUndefined();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('snapshot del agente NO trae verificationMode cuando setting = none (legacy compat)', () => {
+      __setConfig('claudeOrchestrator', 'verification', 'none');
+      bridge.attachWebview(webview as never);
+      bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      const created = postedOf(webview, 'agent_created');
+      expect(created[0].agent.verificationMode).toBeUndefined();
+      runner.finish({ status: 'cancelled', durationMs: 1 });
+    });
+
+    it('verificationReviewed=true se emite vía agent_status_changed al cierre del wait_for_agents', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      emitExitReport(runner, { status: 'ok' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Buscamos el agent_status_changed con verificationReviewed=true.
+      const reviewedEvents = postedOf(webview, 'agent_status_changed').filter(
+        (e) => e.agentId === agentId && e.metadata?.verificationReviewed === true,
+      );
+      expect(reviewedEvents.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('verificationPromoted=true se emite junto con la promoción a needs_review', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      emitExitReport(runner, {
+        status: 'ok',
+        decisions_made_without_consultation: ['unauthorized rename'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      // El evento de promoción debe traer verificationPromoted=true en metadata.
+      const promoted = postedOf(webview, 'agent_status_changed').filter(
+        (e) =>
+          e.agentId === agentId &&
+          e.status === 'needs_review' &&
+          e.metadata?.verificationPromoted === true,
+      );
+      expect(promoted.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('listAgents devuelve snapshots con verificationMode/Reviewed/Promoted poblados post-wait', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'structured');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      emitExitReport(runner, {
+        status: 'ok',
+        uncertainties: ['display_name v19?'],
+      });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      await bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      const list = bridge.listAgents();
+      const agent = list.find((a) => a.id === agentId);
+      expect(agent).toBeDefined();
+      expect(agent?.verificationMode).toBe('structured');
+      expect(agent?.verificationReviewed).toBe(true);
+      expect(agent?.verificationPromoted).toBe(true);
+      expect(agent?.status).toBe('needs_review');
+    });
+
+    it('critic timeout 90s → flag artificial "critic_timeout" visible pero NO promueve (synthetic low)', async () => {
+      vi.useFakeTimers();
+      __setConfig('claudeOrchestrator', 'verification', 'critic');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'A', cwd: '/repos/p' });
+      runner.emit({ type: 'text', text: 'cambié algo.' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 200_000,
+        stuckThresholdMs: 60_000,
+      });
+      // Esperamos a que el bridge invoque al critic.
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      // Avanzamos 91s: el critic timeout (90s) debe disparar el abort.
+      await vi.advanceTimersByTimeAsync(91_000);
+      // Inmediatamente terminamos el critic (como abortado).
+      runner.finish({ status: 'cancelled', durationMs: 91_000, finalResponse: null });
+
+      const result = await waitPromise;
+      vi.useRealTimers();
+      // El flag artificial queda visible en critic_findings para
+      // diagnóstico, pero NO promueve porque es synthetic low-severity
+      // (indica "verification couldn't analyze", no "agent did wrong").
+      expect(result.results[0].verification?.critic_findings).toHaveLength(1);
+      expect(result.results[0].verification?.critic_findings?.[0].summary).toBe('critic_timeout');
+      expect(result.results[0].verification?.critic_findings?.[0].severity).toBe('low');
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification?.auto_promoted_reason).toBeUndefined();
+    });
+
+    it('synthetic low-severity flags (schema-violation, no-output, malformed JSON) NO promueven', async () => {
+      __setConfig('claudeOrchestrator', 'verification', 'critic');
+      bridge.attachWebview(webview as never);
+      const { agentId, finished } = bridge.spawn({ prompt: 'task', cwd: '/repos/p' });
+      runner.emit({ type: 'text', text: 'hice el cambio benigno.' });
+      runner.finish({ status: 'completed', durationMs: 100 });
+      await finished;
+
+      const waitPromise = bridge.waitForAgents({
+        agentIds: [agentId],
+        timeoutMs: 5_000,
+        stuckThresholdMs: 60_000,
+      });
+      await vi.waitFor(() => expect(runner.configs).toHaveLength(2));
+      // El critic Haiku devuelve un output sin JSON block — el parser
+      // sintetiza un flag low-severity 'critic output missing JSON block'.
+      runner.finish({
+        status: 'completed',
+        durationMs: 50,
+        finalResponse: 'Just plain text, no JSON block at the end.',
+      });
+      const result = await waitPromise;
+      // El finding sintético queda visible en el wire-out.
+      const findings = result.results[0].verification?.critic_findings;
+      expect(findings).toHaveLength(1);
+      expect(findings?.[0].severity).toBe('low');
+      // Pero el agente NO se promueve — el critic no encontró nada real.
+      expect(result.results[0].status).toBe('done');
+      expect(result.results[0].verification?.auto_promoted_reason).toBeUndefined();
     });
   });
 });

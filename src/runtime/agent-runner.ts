@@ -112,6 +112,16 @@ export class AgentRunner {
       //   - settingSources ['user']: hereda skills y memoria del usuario
       //     (~/.claude/), no del workspace activo. Coherente con la idea
       //     "ventana del orquestador es global, no por proyecto".
+      // Toolset: si el caller pasó una allow-list explícita, la usamos
+      // como tools del SDK (modo allow-list). Si no, preset claude_code
+      // (default — todos los tools del CLI). El caller típico de la
+      // allow-list es el critic Haiku, que debe poder leer pero no
+      // escribir; ver runtime/exit-schema.ts CRITIC_TOOL_ALLOWLIST.
+      const toolsOption: string[] | { type: 'preset'; preset: 'claude_code' } =
+        config.tools && config.tools.length > 0
+          ? config.tools
+          : { type: 'preset', preset: 'claude_code' };
+
       const generator = this.sdk.query({
         prompt: config.prompt,
         options: {
@@ -121,7 +131,7 @@ export class AgentRunner {
           // interno y lo reporta en SDKSystemMessage.init.model —
           // capturado abajo y emitido como AgentEvent('model').
           model: config.model ?? DEFAULT_MODEL,
-          tools: { type: 'preset', preset: 'claude_code' },
+          tools: toolsOption,
           abortController: sdkAbortController,
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,

@@ -2,7 +2,7 @@
   "name": "claude-orchestrator",
   "displayName": "Claude Orchestrator",
   "description": "VS Code extension to orchestrate multiple Claude Code agents in parallel via embedded MCP server + observable kanban dashboard.",
-  "version": "0.2.0-pre.1",
+  "version": "0.2.0",
   "license": "MIT",
   "publisher": "stevTresCloud",
   "repository": {
@@ -167,6 +167,19 @@
             "Open the resumed session in a new VS Code terminal running 'claude --resume <id>'."
           ],
           "description": "Where to open a past session when clicking Resume. 'chat' uses the Claude Code extension's URI handler; 'terminal' spawns a new VS Code terminal."
+        },
+        "claudeOrchestrator.verification": {
+          "type": "string",
+          "enum": ["none", "structured", "critic", "both", "human-review"],
+          "default": "structured",
+          "enumDescriptions": [
+            "Legacy: no extra verification. wait_for_agents returns the agent's free-text last_message as-is. Use only for atomic tasks where the structured exit adds noise.",
+            "Mechanism D only (default). The orchestrator appends an exit-report instruction to every prompt and parses the agent's final JSON block. Auto-promotes status to 'needs_review' when the agent declares decisions_made_without_consultation or uncertainties. Zero runtime cost — only changes the agent's prompt.",
+            "Mechanism A only. After wait_for_agents, the orchestrator spawns a Haiku critic per terminal agent that reviews the diff <headBefore>..HEAD with read-only tools and flags concerns. Any flag promotes status to 'needs_review'. Adds ~$0.002/agent and ~30-60s per batch.",
+            "Mechanisms D + A combined (recommended for production migrations and cross-file refactors). The structured exit catches what the agent admits; the critic catches what the agent omits.",
+            "Mechanisms D + A + (future) human-review panel. Today equivalent to 'both' — the modal panel that pauses on findings with diff highlighted is roadmapped for v0.2.1+. Set this when you want the future-ready intent recorded in your settings."
+          ],
+          "description": "Verification mode applied at the end of wait_for_agents. Default 'structured' applies Mechanism D (structured exit) at zero runtime cost — see research/VERIFICATION_MECHANISMS.md for the full rationale. Set to 'both' for migrations, refactors with assertion contract changes, or anywhere a silent mistake would cost more than the ~$0.002 critic per agent."
         }
       }
     }

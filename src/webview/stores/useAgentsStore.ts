@@ -23,6 +23,7 @@ import { computed, ref } from 'vue';
 import type { Agent, Project } from '../types';
 import {
   LOG_RING_MAX,
+  isTerminalStatus,
   type AgentCompletedResult,
   type AgentSnapshot,
   type AgentStatus,
@@ -168,15 +169,20 @@ export const useAgentsStore = defineStore('agents', () => {
   );
 
   /**
-   * RECENT — done / failed / cancelled ordenados por completed_at
-   * descendente (más reciente primero).
+   * RECENT — agentes en estado terminal (done / failed / cancelled /
+   * needs_review) ordenados por completed_at descendente. Usamos
+   * `isTerminalStatus` (SSoT en shared/dashboard-protocol) para que
+   * agregar un terminal nuevo no requiera tocar este filtro.
+   *
+   * `needs_review` es un estado terminal promovido por el orchestrator
+   * (Mecanismo D auto-promociona si el agente declaró decisions/uncertainties
+   * en su exit report; Mecanismo A promociona si el critic Haiku emitió
+   * flags). Visualmente ocupa RECENT igual que done/failed/cancelled
+   * pero con stripe naranja + icon eye + badge ⚠ Flagged.
    */
   const recent = computed<Agent[]>(() =>
     agents.value
-      .filter(
-        (a) =>
-          a.status === 'done' || a.status === 'failed' || a.status === 'cancelled',
-      )
+      .filter((a) => isTerminalStatus(a.status))
       .sort((a, b) => {
         const aIso = a.completedAtIso ?? '';
         const bIso = b.completedAtIso ?? '';

@@ -18,6 +18,18 @@ export interface AgentRunConfig {
   model?: ModelAlias;
   abortSignal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
+  /**
+   * Override del toolset que el SDK habilita. Default: preset
+   * `claude_code` (todos los tools del CLI). Cuando se pasa un array
+   * explícito, el SDK opera en allow-list: solo esos nombres de tool
+   * se exponen al agente.
+   *
+   * Caso de uso primario: el critic Haiku del Mecanismo A (verification).
+   * Lo invocamos con `tools: ['Read', 'Bash', 'Grep', 'Glob']` para que
+   * NO pueda usar Write/Edit/NotebookEdit y por tanto no pueda modificar
+   * el código que está revisando.
+   */
+  tools?: string[];
 }
 
 export type AgentStatus = 'running' | 'completed' | 'failed' | 'cancelled';

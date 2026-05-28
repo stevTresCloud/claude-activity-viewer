@@ -44,13 +44,48 @@ export const LOG_RING_MAX = 1000;
  * 'pending' está declarado por consistencia con el shape esperado
  * por las vistas (UP NEXT existe en el diseño) pero el bridge no
  * lo emite todavía — no hay queue management.
+ *
+ * 'needs_review' es una PROMOCIÓN sobre `done`/`failed` que el bridge
+ * aplica al cierre de `wait_for_agents` cuando los mecanismos D + A
+ * (verification) detectan algo que el operador debe revisar:
+ *   - D: el agente declaró `decisions_made_without_consultation` o
+ *     `uncertainties` no vacíos en su exit report.
+ *   - A: el critic Haiku emitió 1+ flags al revisar el diff.
+ * El agente puede haber terminado limpio desde su perspectiva pero
+ * el orchestrator lo marca para evitar merges silenciosos sospechosos.
  */
 export type AgentStatus =
   | 'running'
   | 'pending'
   | 'done'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'needs_review';
+
+/**
+ * Estados terminales: los que indican "el agente terminó su lifecycle, no
+ * volverá a estar corriendo". Lo respetan varios sitios cross-archivo
+ * (bridge `emitStatusChange` invariante, bridge `runWait` pending detection,
+ * store `recent` filter, AgentCardRecent STATUS_PRESENTATION).
+ *
+ * Mantener este enum + `isTerminalStatus` como SSoT evita drift cuando se
+ * agrega un nuevo terminal status (ej. la adición de `'needs_review'` en
+ * Mecanismo D+A obligó a actualizar 4 sitios — sin la constante, uno se
+ * olvidó y permitía un evento late del SDK degradar `needs_review` a
+ * `running`).
+ */
+export const TERMINAL_STATUSES = [
+  'done',
+  'failed',
+  'cancelled',
+  'needs_review',
+] as const satisfies readonly AgentStatus[];
+
+export type TerminalAgentStatus = (typeof TERMINAL_STATUSES)[number];
+
+export function isTerminalStatus(s: AgentStatus): s is TerminalAgentStatus {
+  return (TERMINAL_STATUSES as readonly AgentStatus[]).includes(s);
+}
 
 /**
  * Lifecycle de un proyecto. Derivado en el store a partir de los
@@ -62,6 +97,14 @@ export type ProjectLifecycle = 'active' | 'idle' | 'inactive';
 
 /** Prioridad de un agente pending. Reservado para queue futuro. */
 export type Priority = 'LOW' | 'MED' | 'HIGH';
+
+/**
+ * Modo de verificación del agente (Mecanismo D + A). Capturado al
+ * spawn y persistido en el snapshot; la UI lo usa para decidir si
+ * renderizar el VerificationBadge en la card RECENT. Conjunto cerrado:
+ * coincide con el enum del setting `claudeOrchestrator.verification`.
+ */
+export type VerificationMode = 'none' | 'structured' | 'critic' | 'both' | 'human-review';
 
 /**
  * Estado heurístico del transport MCP. El bridge lo deriva del tiempo
@@ -161,6 +204,34 @@ export interface AgentSnapshot {
   durationMs?: number;
   /** Razón del estado terminal (merge conflict, ide_restart, etc.). */
   reason?: string;
+
+  // === Verification (Mecanismo D + A) — campos UI-visibles ===
+  //
+  // El bloque completo del wire vive en WaitForAgentsAgentResult.verification.
+  // Acá replicamos UN subset (3 booleanos + mode) que la card del sidebar
+  // necesita para renderear el VerificationBadge sin tener que cruzar el
+  // wire de wait_for_agents — el sidebar mantiene su state desde
+  // agent_status_changed.
+
+  /**
+   * Modo de verification capturado al spawn. Lockeado para todo el
+   * lifecycle del agente. La UI lo usa para decidir si mostrar el
+   * VerificationBadge en RECENT (modo === 'none' → sin badge).
+   */
+  verificationMode?: VerificationMode;
+  /**
+   * `true` cuando el bridge ya corrió el paso de verification del agente
+   * (parse del exit + critic spawn si aplica). Mientras es undefined o
+   * false, el badge muestra estado "pending" o no se renderiza.
+   */
+  verificationReviewed?: boolean;
+  /**
+   * `true` cuando el bridge promovió a `needs_review` (por D o por A).
+   * Distinto del `status === 'needs_review'`: ese es el wire-status; este
+   * flag distingue "promovido vs naturalmente done" para el color del
+   * badge (verde si reviewed y NO promoted; naranja si promoted).
+   */
+  verificationPromoted?: boolean;
 }
 
 /**
@@ -215,6 +286,61 @@ export interface AgentCompletedResult {
 // === wait_for_agents (MCP tool) ===
 
 /**
+ * Hallazgo del critic Haiku tras revisar el diff `headBefore..HEAD`.
+ * Wire-out del `parseCriticOutput` del runtime. Severidades:
+ *   - `high`: probable defecto (assertion flip, SQL inválido, etc.).
+ *   - `med`: sospechoso, merece review humana.
+ *   - `low`: estilo, menor, o falla interna del critic (parse error).
+ * `file` y `line` son opcionales porque el critic puede flaggear
+ * patrones cross-file ("nuevas dependencias externas sin justificar")
+ * que no se anclan a una línea específica.
+ */
+export interface CriticFinding {
+  file?: string;
+  line?: number;
+  severity: 'high' | 'med' | 'low';
+  summary: string;
+}
+
+/**
+ * Reporte estructurado que el agente devuelve en su último text block
+ * cuando `verification ≠ 'none'`. Forma autoritativa en
+ * `runtime/exit-schema.ts` (Zod schema EXIT_SCHEMA_V1).
+ *
+ * Nota: cuando `parseExitSchema` falla, este campo queda undefined en
+ * `WaitForAgentsAgentResult` — el chat caller lo distingue de "agente
+ * que cumplió pero declaró vacío" mirando si la key existe.
+ */
+export interface ExitReport {
+  status: 'ok' | 'needs_review' | 'failed';
+  files_changed: string[];
+  evidence_run: string[];
+  decisions_made_without_consultation: string[];
+  uncertainties: string[];
+}
+
+/**
+ * Bloque de verification del wire. Lo incluimos en
+ * `WaitForAgentsAgentResult` cuando el bridge corrió Mecanismo D y/o A.
+ * Los 3 sub-campos son independientes:
+ *   - `mode`: qué setting estaba activo al cierre.
+ *   - `exit_report`: lo que el agente declaró (si parseó).
+ *   - `critic_findings`: lo que el critic Haiku flaggeó (si corrió).
+ *   - `auto_promoted_reason`: por qué el bridge promovió a needs_review.
+ *     Strings estables para métricas: 'decisions' | 'uncertainties' |
+ *     'critic_flags'. Vacío cuando el status NO fue auto-promovido.
+ */
+export interface VerificationReport {
+  mode: 'none' | 'structured' | 'critic' | 'both' | 'human-review';
+  exit_report?: ExitReport;
+  exit_parse_reason?: string;
+  critic_findings?: CriticFinding[];
+  critic_cost_usd?: number;
+  critic_duration_ms?: number;
+  auto_promoted_reason?: string;
+}
+
+/**
  * Resultado por agente terminado dentro del wait. Wire compacto del
  * StoredAgent en estado terminal: lo lee el chat externo para usar
  * el output del agente como contexto.
@@ -244,6 +370,13 @@ export interface WaitForAgentsAgentResult {
    * existe en el registry).
    */
   reason?: string;
+  /**
+   * Bloque verification del Mecanismo D + A. Presente cuando el
+   * setting `claudeOrchestrator.verification` ≠ 'none' al momento
+   * de `wait_for_agents`. Opcional para backwards-compat con consumers
+   * que no lo lean.
+   */
+  verification?: VerificationReport;
 }
 
 /**
