@@ -34,6 +34,7 @@
     "AI",
     "Visualization"
   ],
+  "icon": "resources/icon.png",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -74,7 +75,7 @@
         {
           "id": "claudeOrchestrator",
           "title": "Claude Agents",
-          "icon": "resources/icon.svg"
+          "icon": "resources/activity-bar.svg"
         }
       ]
     },
