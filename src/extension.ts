@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { registerTestAgentCommands } from './commands/test-agent';
 import { AgentRunner } from './runtime/agent-runner';
@@ -15,7 +16,18 @@ import { DashboardBridge } from './dashboard/bridge';
 import { ScannerController } from './dashboard/scanner-controller';
 import { FOCUS_DASHBOARD_COMMAND, StatusBarManager } from './dashboard/status-bar';
 import { CompletionNotifier } from './dashboard/completion-notifier';
-import type { DashboardEventToExtension } from './shared/dashboard-protocol';
+import { deriveProjectContext } from './dashboard/bridge';
+import { expandUserHome } from './dashboard/project-scanner';
+import {
+  createFileIngester,
+  defaultHookPaths,
+  installHook,
+  uninstallHook,
+} from './ingester';
+import type {
+  DashboardEventToExtension,
+  DashboardEventToWebview,
+} from './shared/dashboard-protocol';
 
 // Metadata expuesta al MCP client cuando hace handshake. El name acá es lo
 // que aparece en `claude mcp list` del chat externo; coordina con la entry
@@ -493,6 +505,115 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
+
+  // ====================================================================
+  // === Activity viewer ingester (scaffold) ============================
+  // ====================================================================
+  // Motor read-only del viewer: escucha la actividad de los agentes de
+  // Claude Code vía hooks globales y la traduce a los eventos que el
+  // store del kanban ya consume. Por ahora el sink es el OutputChannel
+  // (smoke); el siguiente paso lo reconecta al bridge/store y retira el
+  // resto del orquestador. Bloque aislado: NO toca el wiring MCP/bridge.
+
+  const forwarderSource = path.join(
+    context.extensionPath,
+    'resources',
+    'hooks',
+    'orchestrator-hook.cjs',
+  );
+
+  const installHooksCmd = vscode.commands.registerCommand(
+    'claudeOrchestrator.installHooks',
+    () => {
+      const result = installHook({ forwarderSource, paths: defaultHookPaths() });
+      if (result.status === 'error') {
+        channel.appendLine(`[ingester] !!! install failed: ${result.message}`);
+        void vscode.window.showErrorMessage(
+          `Claude Orchestrator: hook install failed (${result.message}).`,
+        );
+        return;
+      }
+      channel.appendLine(
+        `[ingester] hooks ${result.status}: +${result.installed.length} installed, ` +
+          `${result.alreadyPresent.length} already present, ${result.skipped.length} skipped. ` +
+          `events → ${result.eventsFile}`,
+      );
+      void vscode.window.showInformationMessage(
+        `Claude Orchestrator: global activity hooks ${result.status}. ` +
+          'Enable claudeOrchestrator.ingesterDebug and reload to tail the stream.',
+      );
+    },
+  );
+  context.subscriptions.push(installHooksCmd);
+
+  const uninstallHooksCmd = vscode.commands.registerCommand(
+    'claudeOrchestrator.uninstallHooks',
+    () => {
+      const result = uninstallHook(defaultHookPaths());
+      channel.appendLine(
+        `[ingester] uninstall: ${result.status} (${result.removed.length} events)`,
+      );
+      void vscode.window.showInformationMessage(
+        `Claude Orchestrator: global activity hooks ${result.status}.`,
+      );
+    },
+  );
+  context.subscriptions.push(uninstallHooksCmd);
+
+  // Tail opt-in: solo cuando ingesterDebug=true. Deriva project/task/
+  // branch del cwd reusando la lógica del dashboard (con ~ expandido en
+  // projectsRoot, igual que el bridge).
+  const ingesterDebug = vscode.workspace
+    .getConfiguration('claudeOrchestrator')
+    .get<boolean>('ingesterDebug', false);
+  if (ingesterDebug) {
+    const deriveContext = (cwd: string) => {
+      const projectsRoot = vscode.workspace
+        .getConfiguration('claudeOrchestrator')
+        .get<string[]>('projectsRoot', [])
+        .map(expandUserHome);
+      const workspaceFolders = (vscode.workspace.workspaceFolders ?? []).map(
+        (f) => f.uri.fsPath,
+      );
+      return deriveProjectContext(cwd, projectsRoot, undefined, workspaceFolders);
+    };
+    const hookPaths = defaultHookPaths();
+    const ingester = createFileIngester({
+      eventsFile: hookPaths.eventsFile,
+      deriveContext,
+      onEvents: (events) => {
+        for (const e of events) {
+          channel.appendLine(`[ingester] ${describeIngestEvent(e)}`);
+        }
+      },
+      log: (msg) => channel.appendLine(msg),
+    });
+    ingester.start();
+    context.subscriptions.push({ dispose: () => ingester.dispose() });
+    channel.appendLine(`[ingester] debug tail started on ${hookPaths.eventsFile}`);
+  }
+}
+
+/** Resumen compacto de un evento traducido, para el log del smoke. */
+function describeIngestEvent(e: DashboardEventToWebview): string {
+  switch (e.type) {
+    case 'agent_created':
+      return `created ${e.agent.id} (${e.agent.name}) proj=${e.agent.project}`;
+    case 'agent_status_changed':
+      return (
+        `status ${e.agentId} → ${e.status}` +
+        (e.metadata?.currentTool ? ` tool=${e.metadata.currentTool}` : '')
+      );
+    case 'agent_log':
+      return (
+        `log ${e.agentId} ${e.entry.kind}` +
+        (e.entry.name ? ` ${e.entry.name}` : '')
+      );
+    case 'agent_completed':
+      return `completed ${e.agentId} ${e.result.status} ${e.result.durationMs}ms`;
+    default:
+      return e.type;
+  }
 }
 
 /**

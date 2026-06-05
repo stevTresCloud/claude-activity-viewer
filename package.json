@@ -68,6 +68,14 @@
       {
         "command": "claudeOrchestrator.injectClaudeMd",
         "title": "Claude Orchestrator: Inject MCP directive into workspaces"
+      },
+      {
+        "command": "claudeOrchestrator.installHooks",
+        "title": "Claude Orchestrator: Install global activity hooks"
+      },
+      {
+        "command": "claudeOrchestrator.uninstallHooks",
+        "title": "Claude Orchestrator: Uninstall global activity hooks"
       }
     ],
     "viewsContainers": {
@@ -152,6 +160,11 @@
           "type": "boolean",
           "default": true,
           "description": "If true (default), the extension injects a marked section into every CLAUDE.md it finds in the direct subfolders of `claudeOrchestrator.projectsRoot`. The section tells the chat caller to prefer `spawn_agents` over Bash/Task for this workspace, making natural-language prompts ('lanza 3 agentes paralelos') work without explicit tool naming. Only updates existing CLAUDE.md files — never creates new ones automatically (use the `Inject MCP directive into workspaces` palette command for that)."
+        },
+        "claudeOrchestrator.ingesterDebug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental (read-only activity viewer): tail the global hook event stream written by 'Install global activity hooks' and log the translated agent events to the output channel. Scaffolding while the viewer is wired to the dashboard; has no effect on the orchestrator."
         },
         "claudeOrchestrator.showTransportState": {
           "type": "boolean",
