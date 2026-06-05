@@ -24,7 +24,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { DashboardBridge } from './bridge';
-import { deriveProjectContextPure } from './bridge';
+import { deriveProjectContextPure } from './project-context';
 import { scanProjects, expandUserHome } from './project-scanner';
 import { scanSessions, SESSION_ID_PATTERN } from './session-scanner';
 import type {

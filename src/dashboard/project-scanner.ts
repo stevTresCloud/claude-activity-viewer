@@ -192,15 +192,8 @@ function runGit(cwd: string, args: string[]): Promise<string | null> {
   });
 }
 
-/**
- * Expand `~/...` a `/home/<user>/...`. Exportado para que el
- * caller pueda canonicalizar antes de pasar el array de roots,
- * y para los tests.
- */
-export function expandUserHome(p: string): string {
-  if (p.startsWith('~/') || p === '~') {
-    const home = process.env.HOME ?? '';
-    return p === '~' ? home : path.join(home, p.slice(2));
-  }
-  return p;
-}
+// `expandUserHome` vive en `project-context.ts` (módulo de helpers de
+// path). Lo re-exportamos acá para no duplicar la definición y para que
+// los consumidores históricos (scanner-controller, tests) lo sigan
+// importando desde este módulo sin cambios.
+export { expandUserHome } from './project-context';

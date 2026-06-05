@@ -7,21 +7,10 @@ const baseConfig = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
   outfile: 'out/extension.js',
-  external: [
-    'vscode',
-    // El SDK Anthropic NO se puede bundlear: incluye un binario nativo
-    // (~227 MB) que el extension host invoca via spawn. Queda como dep
-    // copiada al .vsix vía .vscodeignore.
-    '@anthropic-ai/claude-agent-sdk',
-    // ajv + ajv-formats usan require() con paths construidos en runtime
-    // ("ajv/dist/runtime/equal", "ajv-formats/dist/formats") que esbuild
-    // no puede resolver estáticamente. Si los bundleamos, los require()
-    // dinámicos quedan literales en el output y fallan al ejecutar. La
-    // alternativa es marcarlos como external y copiarlos al .vsix como
-    // packages — esos require() en runtime sí los resuelve Node.
-    'ajv',
-    'ajv-formats',
-  ],
+  // Solo `vscode` queda external (lo provee el extension host). El
+  // viewer ya no depende del SDK Anthropic ni del MCP SDK; zod se
+  // bundlea sin problema (JS puro).
+  external: ['vscode'],
   format: 'cjs',
   platform: 'node',
   target: 'node20',

@@ -9,9 +9,6 @@ import type { AgentStatus } from './dashboard-protocol';
  *   - `src/dashboard/completion-notifier.ts` (formatDurationShort/
  *     formatTokensShort/truncate locales)
  *   - `src/webview/components/detail/LogStream.vue` (truncate local)
- *   - `src/dashboard/bridge.ts` (capitalize local)
- *   - `src/commands/test-agent.ts` (capitalize local, distinta
- *     semántica que el de bridge — bug latente)
  *
  * Convención: si los inputs son inválidos (undefined, NaN), devolver
  * un fallback corto en vez de tirar. La UI prefiere mostrar "—" que
@@ -150,25 +147,9 @@ export function formatCostUsd(
 // === Strings ===
 
 /**
- * capitalize — primera letra mayúscula, resto en minúscula.
- * Normaliza a Title-Case desde aliases que pueden venir en cualquier
- * caso (`sonnet`, `Sonnet`, `SONNET` → todos a `Sonnet`). Usado por
- * `prettyModel` para formatear el id del SDK y por la UI del palette
- * para mostrar el alias seleccionado.
- *
- * Si el caller necesita preservar el caso del tail (ej. nombres
- * propios "McDonald"), usar manipulación directa — no este helper.
- */
-export function capitalize(s: string): string {
-  if (!s) return s;
-  return s[0].toUpperCase() + s.slice(1).toLowerCase();
-}
-
-/**
  * truncate — corta el string a `max` chars y agrega "…" al final si
- * fue cortado. NO truncamiddle (esa variante vive aparte en
- * `bridge.subtitleFromToolInput` porque el tool name necesita
- * conservar ambos extremos).
+ * fue cortado. Corta por el final (no truncamiddle): los call sites lo
+ * usan para previews de log/tool donde conservar el inicio alcanza.
  *
  * Ejemplos:
  *   truncate("hola mundo", 5) → "hola…"
@@ -180,12 +161,13 @@ export function truncate(s: string, max: number): string {
 }
 
 /**
- * Convierte segundos a milisegundos. Centraliza el cast en un solo
- * lugar: los settings del plugin (`maxAgentRuntimeSec`,
- * `stuckDetectionSec`) y el shape MCP (`timeout_sec`) viven en
- * segundos por DX, pero el código operativo (setTimeout, comparación
- * con Date.now()) usa ms.
+ * HH:mm:ss.sss en hora local. Usado como prefijo de cada línea del log
+ * del extension host para que sea grep-friendly y se pueda correlacionar
+ * con otros logs del sistema (Output channel + claude --debug + journalctl).
  */
-export function secondsToMs(s: number): number {
-  return s * 1000;
+export function ts(): string {
+  const d = new Date();
+  return (
+    d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0')
+  );
 }

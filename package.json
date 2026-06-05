@@ -46,28 +46,12 @@
         "title": "Claude Orchestrator: Hello"
       },
       {
-        "command": "claudeOrchestrator.testAgent",
-        "title": "Claude Orchestrator: Test Agent"
-      },
-      {
-        "command": "claudeOrchestrator.cancelTestAgent",
-        "title": "Claude Orchestrator: Cancel Test Agent"
-      },
-      {
         "command": "claudeOrchestrator.rescan",
         "title": "Claude Orchestrator: Rescan projects and sessions"
       },
       {
         "command": "claudeOrchestrator.focusDashboard",
         "title": "Claude Orchestrator: Focus dashboard"
-      },
-      {
-        "command": "claudeOrchestrator.registerMcp",
-        "title": "Claude Orchestrator: Register MCP in Claude Code"
-      },
-      {
-        "command": "claudeOrchestrator.injectClaudeMd",
-        "title": "Claude Orchestrator: Inject MCP directive into workspaces"
       },
       {
         "command": "claudeOrchestrator.installHooks",
@@ -128,48 +112,10 @@
           "default": true,
           "description": "If true, show a VS Code notification toast when an agent finishes (done / failed / cancelled). Click 'Open detail' on the toast to jump to the detail panel."
         },
-        "claudeOrchestrator.defaultModel": {
-          "type": "string",
-          "enum": ["sonnet", "opus", "haiku"],
-          "default": "sonnet",
-          "enumDescriptions": [
-            "Sonnet — balanced cost/capability (default)",
-            "Opus — highest capability, slowest, most expensive",
-            "Haiku — fastest, cheapest, lowest capability"
-          ],
-          "description": "Default Claude model used when an agent is spawned without an explicit model. Applies to MCP spawn_agents calls that omit the 'model' field and to the palette command 'Test Agent' when the user picks the default option."
-        },
-        "claudeOrchestrator.maxAgentRuntimeSec": {
-          "type": "number",
-          "default": 2000,
-          "minimum": 60,
-          "description": "Tiempo máximo (en segundos) que un agente puede estar vivo. Pasado ese tiempo, el bridge lo cancela automáticamente con status=failed y reason=max_runtime_exceeded. Cap defensivo contra agentes pegados. Subí este número para tareas largas (migraciones, audits completos). Default: 2000 (~33 min)."
-        },
-        "claudeOrchestrator.stuckDetectionSec": {
-          "type": "number",
-          "default": 60,
-          "minimum": 5,
-          "description": "Si un agente running no emite ningún evento durante N segundos, wait_for_agents lo marca con suspected_stuck=true en la respuesta (NO lo cancela — el chat decide). Subí este número si tus tareas legítimamente quedan en silencio más tiempo entre eventos (Read de archivos grandes, Bash silenciosos). Default: 60s."
-        },
-        "claudeOrchestrator.autoRegisterMcp": {
-          "type": "boolean",
-          "default": true,
-          "description": "If true (default), the extension writes its MCP server entry directly into ~/.claude.json on activation, so the user does not need to run `claude mcp add-json` manually. Set to false to opt out and use the manual setup command printed to the output channel."
-        },
-        "claudeOrchestrator.autoInjectClaudeMd": {
-          "type": "boolean",
-          "default": true,
-          "description": "If true (default), the extension injects a marked section into every CLAUDE.md it finds in the direct subfolders of `claudeOrchestrator.projectsRoot`. The section tells the chat caller to prefer `spawn_agents` over Bash/Task for this workspace, making natural-language prompts ('lanza 3 agentes paralelos') work without explicit tool naming. Only updates existing CLAUDE.md files — never creates new ones automatically (use the `Inject MCP directive into workspaces` palette command for that)."
-        },
         "claudeOrchestrator.ingesterDebug": {
           "type": "boolean",
           "default": false,
-          "description": "Experimental (read-only activity viewer): tail the global hook event stream written by 'Install global activity hooks' and log the translated agent events to the output channel. Scaffolding while the viewer is wired to the dashboard; has no effect on the orchestrator."
-        },
-        "claudeOrchestrator.showTransportState": {
-          "type": "boolean",
-          "default": false,
-          "description": "If true, show a yellow banner at the top of the dashboard when a wait_for_agents call has been blocked for >60s without resolving (heuristic for a degraded MCP transport — agents continue running but the chat caller never got the long-poll response). Off by default until validated in productive use; flip to true to opt in."
+          "description": "If true, log every translated agent event from the global hook stream to the output channel. The viewer ingests events regardless of this flag; it only controls verbose diagnostics."
         },
         "claudeOrchestrator.resumeIn": {
           "type": "string",
@@ -210,8 +156,6 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@vscode/codicons": "^0.0.36",
     "pinia": "^3.0.0",
     "vue": "^3.5.0",
