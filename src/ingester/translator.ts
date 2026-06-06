@@ -123,7 +123,16 @@ export class HookTranslator {
   /** Lectura del transcript del agente (para el detail panel de F3). */
   getTranscriptPath(agentId: string): string | undefined {
     const state = this.agents.get(agentId);
-    return state?.agentTranscriptPath ?? state?.transcriptPath;
+    return state ? this.transcriptPathOf(state) : undefined;
+  }
+
+  /**
+   * Transcript autoritativo del agente: el `agent_transcript_path` del
+   * Stop gana al `transcript_path` del Start. Regla única reusada por
+   * `getTranscriptPath`, `buildSnapshot` y el cierre del Stop.
+   */
+  private transcriptPathOf(state: AgentState): string | undefined {
+    return state.agentTranscriptPath ?? state.transcriptPath;
   }
 
   // === Handlers por evento ===
@@ -228,6 +237,7 @@ export class HookTranslator {
     const metadata: Partial<AgentSnapshot> = {
       completedAtIso,
       lastActivityIso: completedAtIso,
+      transcriptPath: this.transcriptPathOf(state),
     };
     if (durationMs !== undefined) {
       metadata.durationMs = durationMs;
@@ -352,6 +362,7 @@ export class HookTranslator {
       elapsedMs: 0,
       tokensUsed: 0,
       contextUsedPct: 0,
+      transcriptPath: this.transcriptPathOf(state),
     };
   }
 }

@@ -154,6 +154,15 @@ export interface AgentSnapshot {
    */
   sessionId?: string;
 
+  /**
+   * Path absoluto al transcript `.jsonl` del agente (lo reporta el hook
+   * `SubagentStart`/`SubagentStop`). El host lo lee on-demand para
+   * derivar tokens/modelo/context% cuando se abre el detail panel. No
+   * lo renderiza ninguna card; es el insumo de `agent_metrics`. Vacío
+   * para snapshots viejos persistidos antes de threadearlo.
+   */
+  transcriptPath?: string;
+
   // Agrupación visual (cards del dashboard)
   project: string;
   task: string;
@@ -298,6 +307,18 @@ export interface AgentCompletedResult {
   tokensUsed: number;
   reason?: string;
 }
+
+/**
+ * Métricas derivadas del transcript `.jsonl` de un agente. Las computa
+ * el host (transcript-reader) on-demand al hidratar el detail panel y
+ * las manda en `agent_metrics`. Todos los campos opcionales: un parseo
+ * fallido o un transcript sin assistant no emiten nada, y la UI
+ * (ContextBar/ModelBadge) se esconde sin dato.
+ */
+export type AgentMetrics = Pick<
+  AgentSnapshot,
+  'model' | 'contextTokens' | 'contextUsedPct' | 'tokensUsed'
+>;
 
 // === wait_for_agents (MCP tool) ===
 
@@ -482,6 +503,14 @@ export type DashboardEventToWebview =
    * un agente con 1000 entries, esto es ~1 frame en vez de 1000.
    */
   | { type: 'agent_log_history'; agentId: string; entries: LogEntry[] }
+  /**
+   * Métricas del transcript de un agente (modelo, tokens, context%).
+   * Las emite el bridge al webview que solicitó la hidratación del
+   * detail panel — targeted, igual que `agent_log_history`. El store
+   * las mergea al snapshot; ContextBar/ModelBadge se encienden con
+   * ellas y se esconden si no llegan (parseo fallido / sin transcript).
+   */
+  | { type: 'agent_metrics'; agentId: string; metrics: AgentMetrics }
   /**
    * Transición del estado heurístico del transport. Se emite SOLO
    * cuando cambia (no en cada update); la UI guarda el último valor

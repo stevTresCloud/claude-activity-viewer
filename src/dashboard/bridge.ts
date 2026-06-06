@@ -21,6 +21,7 @@
 
 import * as vscode from 'vscode';
 import { ts } from '../shared/format';
+import { readTranscriptMetrics } from './transcript-reader';
 import {
   LOG_RING_MAX,
   isTerminalStatus,
@@ -539,6 +540,32 @@ export class DashboardBridge {
       `[${ts()}] [bridge] hydrate logs agent=${agentId.slice(0, 8)} entries=${entries.length}`,
     );
     const event = { type: 'agent_log_history' as const, agentId, entries };
+    if (targetWebview) {
+      targetWebview.postMessage(event);
+    } else {
+      this.post(event);
+    }
+  }
+
+  /**
+   * Lee el transcript del agente (modelo / tokens / context%) y emite
+   * `agent_metrics` al webview que pidió la hidratación. On-demand: solo
+   * cuando el detail panel se monta. Degrada en silencio — si el agente
+   * no tiene `transcriptPath` o el parseo no devuelve nada, no emite y la
+   * UI deja ContextBar/ModelBadge ocultos. No muta el registry (espejo de
+   * `hydrateLogs`: emisión read-only al webview solicitante).
+   */
+  async hydrateMetrics(
+    agentId: string,
+    targetWebview?: vscode.Webview,
+  ): Promise<void> {
+    const stored = this.agents.get(agentId);
+    const metrics = await readTranscriptMetrics(stored?.snapshot.transcriptPath);
+    if (Object.keys(metrics).length === 0) return;
+    this.channel.appendLine(
+      `[${ts()}] [bridge] hydrate metrics agent=${agentId.slice(0, 8)} model=${metrics.model ?? '—'}`,
+    );
+    const event = { type: 'agent_metrics' as const, agentId, metrics };
     if (targetWebview) {
       targetWebview.postMessage(event);
     } else {

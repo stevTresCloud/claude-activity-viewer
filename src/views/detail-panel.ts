@@ -138,6 +138,9 @@ export class DetailPanelManager implements vscode.Disposable {
       const msg = raw as DashboardEventToExtension;
       if (msg.type === 'request_hydrate_logs') {
         this.bridge.hydrateLogs(msg.agentId, panel.webview);
+        // Métricas del transcript (modelo/tokens/context%): lectura
+        // async on-demand, fire-and-forget. Si falla degrada a no-op.
+        void this.bridge.hydrateMetrics(msg.agentId, panel.webview);
         return;
       }
       if (cb) cb(msg);

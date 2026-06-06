@@ -26,6 +26,7 @@ import { postToExtension } from '../composables/usePostToExtension';
 import { formatCostUsd, formatElapsed, formatTokens } from '../utils/format';
 import StatusDot from '../components/atoms/StatusDot.vue';
 import ModelBadge from '../components/atoms/ModelBadge.vue';
+import ContextBar from '../components/atoms/ContextBar.vue';
 import LogStream from '../components/detail/LogStream.vue';
 
 const detail = useDetailMode();
@@ -140,6 +141,18 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
           {{ formatCostUsd(agent.costUsd, agent.status) }}
         </span>
       </div>
+      <!-- Context% del transcript (agent_metrics). Gateamos por
+           contextTokens, NO por contextUsedPct: buildSnapshot siembra
+           contextUsedPct=0 en cada agente, así que sería siempre
+           visible (0% engañoso). contextTokens solo existe cuando el
+           transcript trajo `usage`, así que es la señal real de "hay
+           dato" — sin él la barra se esconde (degradación elegante). -->
+      <ContextBar
+        v-if="agent.contextTokens !== undefined"
+        class="ctx-bar"
+        :pct="agent.contextUsedPct ?? 0"
+        :context-tokens="agent.contextTokens"
+      />
     </header>
 
     <!-- === Body: LogStream con auto-scroll === -->
@@ -239,6 +252,10 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
   gap: 8px;
   margin-top: 8px;
   flex-wrap: wrap;
+}
+.ctx-bar {
+  margin-top: 10px;
+  max-width: 320px;
 }
 .meta-chip {
   font-size: 11px;

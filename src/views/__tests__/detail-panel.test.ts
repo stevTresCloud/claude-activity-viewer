@@ -43,6 +43,7 @@ function makeBridge() {
     attachWebview: vi.fn((webview: unknown) => webview),
     detachWebview: vi.fn(),
     hydrateLogs: vi.fn(),
+    hydrateMetrics: vi.fn(async () => undefined),
   } as unknown as DashboardBridge;
 }
 

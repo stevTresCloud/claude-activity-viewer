@@ -25,6 +25,7 @@ import {
   LOG_RING_MAX,
   isTerminalStatus,
   type AgentCompletedResult,
+  type AgentMetrics,
   type AgentSnapshot,
   type AgentStatus,
   type LogEntry,
@@ -155,6 +156,19 @@ export const useAgentsStore = defineStore('agents', () => {
   /** Setea el transportState con el último valor que emitió el bridge. */
   function setTransportState(state: TransportState): void {
     transportState.value = state;
+  }
+
+  /**
+   * Mergea las métricas del transcript (modelo/tokens/context%) al
+   * snapshot. Lo dispara `agent_metrics`, que el bridge emite al detail
+   * panel cuando se hidrata. Object.assign sin pisar campos no enviados;
+   * un parseo parcial (solo `model`, sin usage) actualiza lo que llegó y
+   * deja el resto como estaba.
+   */
+  function applyMetrics(agentId: string, metrics: AgentMetrics): void {
+    const agent = agents.value.find((a) => a.id === agentId);
+    if (!agent) return;
+    Object.assign(agent, metrics);
   }
 
   /**
@@ -400,6 +414,7 @@ export const useAgentsStore = defineStore('agents', () => {
     replaceLogsForAgent,
     markAgentCompleted,
     setTransportState,
+    applyMetrics,
     // getters
     nowPlaying,
     upNext,

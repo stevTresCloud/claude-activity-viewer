@@ -402,4 +402,29 @@ describe('full lifecycle + transcript pointers', () => {
     // Tras el stop, el transcript del agente gana al de arranque.
     expect(translator.getTranscriptPath('a-1')).toBe('/tmp/agent.jsonl');
   });
+
+  it('carries transcriptPath on the snapshot (create) and updates it on stop', () => {
+    const { translator } = makeTranslator();
+    const created = translator.translate(
+      ev({
+        hook_event_name: 'SubagentStart',
+        agent_id: 'a-1',
+        cwd: '/p',
+        transcript_path: '/tmp/s.jsonl',
+      }),
+    )[0];
+    if (created.type !== 'agent_created') throw new Error('unreachable');
+    expect(created.agent.transcriptPath).toBe('/tmp/s.jsonl');
+
+    const stopEvents = translator.translate(
+      ev({
+        hook_event_name: 'SubagentStop',
+        agent_id: 'a-1',
+        agent_transcript_path: '/tmp/agent.jsonl',
+      }),
+    );
+    const done = stopEvents.find((e) => e.type === 'agent_status_changed');
+    if (done?.type !== 'agent_status_changed') throw new Error('unreachable');
+    expect(done.metadata?.transcriptPath).toBe('/tmp/agent.jsonl');
+  });
 });

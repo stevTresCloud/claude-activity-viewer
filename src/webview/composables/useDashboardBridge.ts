@@ -68,6 +68,12 @@ export function useDashboardBridge(): void {
       case 'agent_completed':
         agents.markAgentCompleted(data.agentId, data.result);
         break;
+      case 'agent_metrics':
+        // Llega cuando el detail panel pidió `request_hydrate_logs`: el
+        // bridge leyó el transcript y derivó modelo/tokens/context%.
+        // Se mergean al snapshot; ModelBadge/ContextBar se encienden.
+        agents.applyMetrics(data.agentId, data.metrics);
+        break;
       case 'projects_from_disk':
         scanner.applyProjectsFromDisk(data.projects, data.scannedAtIso);
         break;
