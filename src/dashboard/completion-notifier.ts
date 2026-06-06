@@ -96,12 +96,15 @@ export function formatMessage(event: AgentCompletionEvent): string {
       : event.status === 'failed'
         ? 'failed'
         : 'was cancelled';
-  const duration = formatElapsedShort(event.durationMs);
+  // Sin durationMs (no vimos el arranque) omitimos el "in <duración>" en
+  // vez de mostrar "in 0s", que mentiría sobre lo que tardó el agente.
+  const durationFragment =
+    event.durationMs !== undefined ? ` in ${formatElapsedShort(event.durationMs)}` : '';
   const tokensFragment =
     event.tokensUsed > 0 ? ` · ${formatTokens(event.tokensUsed)} tokens` : '';
   const reasonFragment =
     event.status === 'failed' && event.reason
       ? ` (${truncate(event.reason, 60)})`
       : '';
-  return `Agent ${event.name} ${verb} in ${duration}${tokensFragment}${reasonFragment}`;
+  return `Agent ${event.name} ${verb}${durationFragment}${tokensFragment}${reasonFragment}`;
 }

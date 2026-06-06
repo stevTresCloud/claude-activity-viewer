@@ -67,7 +67,8 @@ export interface AgentCompletionEvent {
   agentId: string;
   name: string;
   status: 'done' | 'failed' | 'cancelled';
-  durationMs: number;
+  /** Undefined cuando no vimos el arranque del agente (ver AgentCompletedResult). */
+  durationMs?: number;
   tokensUsed: number;
   reason?: string;
 }
@@ -184,8 +185,9 @@ export class DashboardBridge {
    * webview attache, recibe el agent_list completo.
    *
    * Nota viewer: un agente observado que SIGUE vivo tras un reload del
-   * IDE se marca como huérfano acá; el ingester lo re-materializará al
-   * re-procesar el spool. La reconciliación liveness fina es trabajo de F3.
+   * IDE se marca como huérfano acá (failed/ide_restart). Si después el
+   * ingester re-emite eventos vivos de ese agente, lo resucitamos en
+   * `reactivateIfOrphan` — el huérfano era una conjetura, no un cierre real.
    */
   async hydrate(): Promise<void> {
     const stored = this.context.globalState.get<StoredAgent[]>(STATE_KEY, []);
@@ -320,9 +322,27 @@ export class DashboardBridge {
    * Alta de un agente observado. Idempotente: el translator ya deduplica
    * SubagentStart, pero si un re-proceso del spool reenvía el created no
    * duplicamos la entry ni el card.
+   *
+   * Excepción: si el agente ya existe pero está en recovery de huérfano
+   * (failed/ide_restart), un created nuevo significa que el agente revive
+   * → lo reactivamos y reemitimos status running (NO un agent_created, que
+   * duplicaría el card del lado webview).
    */
   private applyCreated(snapshot: AgentSnapshot): void {
-    if (this.agents.has(snapshot.id)) return;
+    if (this.agents.has(snapshot.id)) {
+      if (this.reactivateIfOrphan(snapshot.id)) {
+        const lastActivityIso = this.agents.get(snapshot.id)?.snapshot.lastActivityIso;
+        this.post({
+          type: 'agent_status_changed',
+          agentId: snapshot.id,
+          status: 'running',
+          metadata: { lastActivityIso },
+        });
+        this.schedulePersist();
+        this.notifyRunningCount();
+      }
+      return;
+    }
     this.agents.set(snapshot.id, {
       snapshot: { ...snapshot },
       cwd: '',
@@ -333,6 +353,43 @@ export class DashboardBridge {
     this.schedulePersist();
     // Nuevo agente running → refrescamos el count del status bar.
     this.notifyRunningCount();
+  }
+
+  /**
+   * ¿El snapshot está en recovery de huérfano? Es el estado "blando" que
+   * pone `hydrate()` (failed con reason='ide_restart') cuando un agente
+   * sobrevive a un reload del IDE: una conjetura de que murió, no un
+   * cierre real. Se distingue de un terminal "duro" (un SubagentStop real,
+   * o failed/cancelled con otra razón) que NO debe revertirse nunca.
+   */
+  private isOrphanRecovery(snapshot: AgentSnapshot): boolean {
+    return snapshot.status === 'failed' && snapshot.reason === 'ide_restart';
+  }
+
+  /**
+   * Si el agente está en recovery de huérfano, lo devuelve a `running` y
+   * limpia los marcadores terminales (reason/completedAtIso/durationMs).
+   * Reconcilia el registry con lo que el ingester volvió a emitir: sin
+   * esto, el guard terminal de `mutateSnapshot` dejaría el registry en
+   * `failed` mientras el webview recibe eventos `running` → divergencia
+   * hasta el próximo reload. Devuelve true si resucitó algo (el caller
+   * decide si reemitir/persistir/refrescar el count).
+   */
+  private reactivateIfOrphan(agentId: string): boolean {
+    const stored = this.agents.get(agentId);
+    if (!stored || !this.isOrphanRecovery(stored.snapshot)) return false;
+    stored.snapshot.status = 'running';
+    delete stored.snapshot.reason;
+    delete stored.snapshot.completedAtIso;
+    delete stored.snapshot.durationMs;
+    // El evento vivo que dispara la resurrección ES actividad reciente:
+    // sellamos lastActivityIso para que el agente no aparezca "idle" por
+    // un startedAtIso viejo (caso huérfano de un snapshot pre-liveness).
+    stored.snapshot.lastActivityIso = new Date().toISOString();
+    this.channel.appendLine(
+      `[${ts()}] [bridge] resurrect orphan agent=${agentId.slice(0, 8)} (live event after ide_restart)`,
+    );
+    return true;
   }
 
   /**
@@ -367,9 +424,15 @@ export class DashboardBridge {
     status: AgentStatus,
     metadata?: Partial<AgentSnapshot>,
   ): void {
+    // Huérfano que revive: un evento vivo (running/tool) sobre un agente
+    // marcado failed/ide_restart lo reactiva antes de aplicar el cambio.
+    const resurrected = this.reactivateIfOrphan(agentId);
     this.mutateSnapshot(agentId, status, metadata);
     this.post({ type: 'agent_status_changed', agentId, status, metadata });
     this.schedulePersist();
+    // failed→running suma 1 al count de running; los cambios normales
+    // mid-run no lo mueven, por eso solo notificamos al resucitar.
+    if (resurrected) this.notifyRunningCount();
   }
 
   /**
@@ -383,11 +446,18 @@ export class DashboardBridge {
    * ya suelen estar en el snapshot; el guard de completedAtIso evita pisarlo.
    */
   private applyCompleted(agentId: string, result: AgentCompletedResult): void {
+    // Un SubagentStop real tras un restart override-a el ide_restart: el
+    // agente sí terminó, solo que el cierre llegó después del reload.
+    this.reactivateIfOrphan(agentId);
     const stored = this.agents.get(agentId);
     const metadata: Partial<AgentSnapshot> = {
-      durationMs: result.durationMs,
       tokensUsed: result.tokensUsed,
     };
+    // durationMs es opcional: cuando no vimos el arranque queda undefined y
+    // NO lo escribimos (la UI muestra "—" en vez de "0s").
+    if (result.durationMs !== undefined) {
+      metadata.durationMs = result.durationMs;
+    }
     if (stored && !stored.snapshot.completedAtIso) {
       metadata.completedAtIso = new Date().toISOString();
     }

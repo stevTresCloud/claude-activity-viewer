@@ -111,6 +111,38 @@ describe('useAgentsStore — actions', () => {
     expect(store.agents[0].status).toBe('running');
   });
 
+  it('updateAgentStatus de terminal→running limpia los campos terminales (resurrección)', () => {
+    const store = useAgentsStore();
+    store.addAgent(
+      snap({
+        id: 'a',
+        status: 'failed',
+        reason: 'ide_restart',
+        completedAtIso: '2026-05-25T10:00:00Z',
+        durationMs: 5000,
+      }),
+    );
+    store.updateAgentStatus('a', 'running');
+    const agent = store.agents[0];
+    expect(agent.status).toBe('running');
+    expect(agent.reason).toBeUndefined();
+    expect(agent.completedAtIso).toBeUndefined();
+    expect(agent.durationMs).toBeUndefined();
+  });
+
+  it('updateAgentStatus de running→done NO limpia (cierre normal conserva metadata)', () => {
+    const store = useAgentsStore();
+    store.addAgent(snap({ id: 'a', status: 'running' }));
+    store.updateAgentStatus('a', 'done', {
+      completedAtIso: '2026-05-26T10:00:00Z',
+      durationMs: 1234,
+    });
+    const agent = store.agents[0];
+    expect(agent.status).toBe('done');
+    expect(agent.completedAtIso).toBe('2026-05-26T10:00:00Z');
+    expect(agent.durationMs).toBe(1234);
+  });
+
   it('appendLog respeta el bound FIFO 1000 — push 1001 → primer entry descartado', () => {
     const store = useAgentsStore();
     for (let i = 0; i < 1001; i++) {
@@ -191,6 +223,15 @@ describe('useAgentsStore — actions', () => {
     expect(() =>
       store.markAgentCompleted('no-existe', { status: 'done', durationMs: 1, tokensUsed: 0 }),
     ).not.toThrow();
+  });
+
+  it('markAgentCompleted con durationMs undefined NO pisa un valor previo', () => {
+    // Espejo del guard del bridge: si el cierre llega sin duración (no
+    // vimos el arranque) no debe borrar una durationMs ya conocida.
+    const store = useAgentsStore();
+    store.addAgent(snap({ id: 'a', durationMs: 5000 }));
+    store.markAgentCompleted('a', { status: 'done', durationMs: undefined, tokensUsed: 0 });
+    expect(store.agents[0].durationMs).toBe(5000);
   });
 
   it('markAgentCompleted sin reason no toca el campo (no pisa con undefined)', () => {
@@ -369,5 +410,64 @@ describe('useAgentsStore — projects + totalCount', () => {
     store.addAgent(snap({ id: 'a' }));
     store.addAgent(snap({ id: 'b' }));
     expect(store.totalCount).toBe(2);
+  });
+});
+
+// =====================================================================
+// === staleAgentIds (liveness) ========================================
+// =====================================================================
+
+describe('useAgentsStore — staleAgentIds', () => {
+  // Reloj congelado: la ventana de staleness (90s) se evalúa contra
+  // Date.now() — sin fake timers el test sería sensible al wallclock.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-26T12:00:00Z'));
+  });
+
+  it('marca running sin actividad reciente (>90s) como stale', () => {
+    const store = useAgentsStore();
+    store.applyAgentList([
+      snap({ id: 'a', status: 'running', lastActivityIso: '2026-05-26T11:58:00Z' }),
+    ]);
+    expect(store.staleAgentIds.has('a')).toBe(true);
+  });
+
+  it('NO marca running con actividad reciente (<90s)', () => {
+    const store = useAgentsStore();
+    store.applyAgentList([
+      snap({ id: 'a', status: 'running', lastActivityIso: '2026-05-26T11:59:30Z' }),
+    ]);
+    expect(store.staleAgentIds.has('a')).toBe(false);
+  });
+
+  it('agentes no-running nunca son stale', () => {
+    const store = useAgentsStore();
+    store.applyAgentList([
+      snap({
+        id: 'd',
+        status: 'done',
+        lastActivityIso: '2026-05-25T00:00:00Z',
+        completedAtIso: '2026-05-25T00:00:00Z',
+      }),
+    ]);
+    expect(store.staleAgentIds.has('d')).toBe(false);
+  });
+
+  it('cae a startedAtIso cuando falta lastActivityIso (snapshot viejo pre-F3)', () => {
+    const store = useAgentsStore();
+    // snap base trae startedAtIso 2026-05-25 (>24h < ahora) → stale.
+    store.applyAgentList([
+      snap({ id: 'a', status: 'running', lastActivityIso: undefined }),
+    ]);
+    expect(store.staleAgentIds.has('a')).toBe(true);
+  });
+
+  it('lastActivityIso inválido (guard Number.isFinite) → no stale', () => {
+    const store = useAgentsStore();
+    store.applyAgentList([
+      snap({ id: 'a', status: 'running', lastActivityIso: 'not-an-iso' }),
+    ]);
+    expect(store.staleAgentIds.has('a')).toBe(false);
   });
 });

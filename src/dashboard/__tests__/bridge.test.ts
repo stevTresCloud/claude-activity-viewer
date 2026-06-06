@@ -563,3 +563,99 @@ describe('DashboardBridge — hydrate y persistencia', () => {
     expect(agents[0].id).toBe('persisted');
   });
 });
+
+// =====================================================================
+// === Resurrección de huérfanos (liveness reconciliation) =============
+// =====================================================================
+
+describe('DashboardBridge — resurrección de huérfanos', () => {
+  beforeEach(() => __resetVscode());
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Hidrata un bridge con un único agente huérfano (failed/ide_restart). */
+  async function withOrphan(id = 'orphan') {
+    const ctx = makeContext();
+    ctx.globalState.update(STATE_KEY, [
+      { snapshot: makeSnapshot({ id, status: 'running' }), cwd: '/x', prompt: 'p', log: [] },
+    ]);
+    const { bridge } = makeBridge(ctx);
+    await bridge.hydrate();
+    return { bridge };
+  }
+
+  it('un status_changed running sobre un huérfano lo resucita y reconcilia', async () => {
+    const { bridge } = await withOrphan();
+    bridge.ingest(statusChanged('orphan', 'running', { currentTool: 'Read' }));
+
+    const fresh = makeWebview();
+    bridge.attachWebview(fresh as never);
+    const snap = postedOf(fresh, 'agent_list')[0].agents[0];
+    expect(snap.status).toBe('running');
+    expect(snap.reason).toBeUndefined();
+    expect(snap.completedAtIso).toBeUndefined();
+    expect(snap.currentTool).toBe('Read');
+    // El evento vivo selló actividad reciente → no debe quedar "idle".
+    expect(snap.lastActivityIso).toBeTruthy();
+    expect(bridge.getRunningCount()).toBe(1);
+  });
+
+  it('resucitar refresca el running count (failed→running)', async () => {
+    const { bridge } = await withOrphan();
+    const counts: number[] = [];
+    bridge.onRunningCountChange((c) => counts.push(c));
+    expect(counts).toEqual([0]); // huérfano failed no cuenta
+    bridge.ingest(statusChanged('orphan', 'running'));
+    expect(counts.at(-1)).toBe(1);
+  });
+
+  it('un agent_created sobre un huérfano NO duplica el card: reemite running, no created', async () => {
+    const { bridge } = await withOrphan();
+    const live = makeWebview();
+    bridge.attachWebview(live as never);
+
+    bridge.ingest(created(makeSnapshot({ id: 'orphan', status: 'running' })));
+
+    // No re-emite agent_created (duplicaría el card del lado webview).
+    expect(postedOf(live, 'agent_created')).toHaveLength(0);
+    expect(postedOf(live, 'agent_status_changed').some((e) => e.status === 'running')).toBe(true);
+
+    const fresh = makeWebview();
+    bridge.attachWebview(fresh as never);
+    const agents = postedOf(fresh, 'agent_list')[0].agents;
+    expect(agents).toHaveLength(1);
+    expect(agents[0].status).toBe('running');
+    expect(agents[0].lastActivityIso).toBeTruthy();
+    expect(bridge.getRunningCount()).toBe(1);
+  });
+
+  it('un agent_completed real tras restart override-a el ide_restart', async () => {
+    const { bridge } = await withOrphan();
+    bridge.ingest(completed('orphan', 4200, 'done'));
+
+    const fresh = makeWebview();
+    bridge.attachWebview(fresh as never);
+    const snap = postedOf(fresh, 'agent_list')[0].agents[0];
+    expect(snap.status).toBe('done');
+    expect(snap.reason).toBeUndefined(); // ide_restart limpiado
+    expect(snap.durationMs).toBe(4200);
+    expect(bridge.getRunningCount()).toBe(0);
+  });
+
+  it('un failed real (reason ≠ ide_restart) NO se resucita con un evento tardío', () => {
+    const { bridge } = makeBridge();
+    bridge.ingest(created(makeSnapshot({ id: 'a' })));
+    bridge.ingest({
+      type: 'agent_completed',
+      agentId: 'a',
+      result: { status: 'failed', durationMs: 1, tokensUsed: 0, reason: 'oom' },
+    });
+    // Evento vivo tardío: NO debe revertir un failed legítimo.
+    bridge.ingest(statusChanged('a', 'running', { currentTool: 'Bash' }));
+
+    const fresh = makeWebview();
+    bridge.attachWebview(fresh as never);
+    const snap = postedOf(fresh, 'agent_list')[0].agents[0];
+    expect(snap.status).toBe('failed');
+    expect(snap.reason).toBe('oom');
+  });
+});

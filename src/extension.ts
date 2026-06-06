@@ -252,7 +252,10 @@ function describeIngestEvent(e: DashboardEventToWebview): string {
         (e.entry.name ? ` ${e.entry.name}` : '')
       );
     case 'agent_completed':
-      return `completed ${e.agentId} ${e.result.status} ${e.result.durationMs}ms`;
+      return (
+        `completed ${e.agentId} ${e.result.status}` +
+        (e.result.durationMs !== undefined ? ` ${e.result.durationMs}ms` : '')
+      );
     default:
       return e.type;
   }

@@ -34,6 +34,14 @@ import { useNow } from '../composables/useNow';
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
+// Un agente `running` sin eventos de hook por más de esto se considera
+// "sin actividad reciente" (stale). Heurística, NO terminal: el agente
+// puede seguir vivo en una tool larga (build, test suite). El único
+// "sigue vivo" que el viewer tiene es el próximo evento de hook, así que
+// inferimos staleness por silencio. Hardcoded como TWENTY_FOUR_HOURS_MS
+// (mismo patrón que el lifecycle de proyecto, sin setting).
+const STALE_AFTER_MS = 90 * 1000;
+
 export const useAgentsStore = defineStore('agents', () => {
   // === State ===
 
@@ -94,6 +102,16 @@ export const useAgentsStore = defineStore('agents', () => {
   ): void {
     const agent = agents.value.find((a) => a.id === agentId);
     if (!agent) return;
+    // Reconciliación de resurrección: si el agente vuelve a un estado no
+    // terminal (el bridge resucitó un huérfano ide_restart al recibir
+    // eventos vivos), limpiamos los campos terminales que quedaron del
+    // marcaje previo — si no, un agente `running` arrastraría reason +
+    // completedAtIso del fallido aunque no se rendericen en la card.
+    if (!isTerminalStatus(status) && isTerminalStatus(agent.status)) {
+      agent.reason = undefined;
+      agent.completedAtIso = undefined;
+      agent.durationMs = undefined;
+    }
     agent.status = status;
     if (metadata) {
       Object.assign(agent, metadata);
@@ -150,7 +168,9 @@ export const useAgentsStore = defineStore('agents', () => {
     const agent = agents.value.find((a) => a.id === agentId);
     if (!agent) return;
     agent.status = result.status;
-    agent.durationMs = result.durationMs;
+    // durationMs opcional: no lo pisamos con undefined (no vimos el
+    // arranque) — espejo del guard del bridge en applyCompleted.
+    if (result.durationMs !== undefined) agent.durationMs = result.durationMs;
     agent.tokensUsed = result.tokensUsed;
     if (result.reason) agent.reason = result.reason;
     if (!agent.completedAtIso) {
@@ -233,6 +253,32 @@ export const useAgentsStore = defineStore('agents', () => {
   // recomputa si tiene observers — los dropdowns cerrados no
   // pagan costo.
   const now = useNow();
+
+  /**
+   * Ids de agentes `running` que llevan más de STALE_AFTER_MS sin un
+   * evento de hook. Lo consumen las cards running para pintar "sin
+   * actividad reciente" sin sacar al agente de NOW PLAYING. Reactivo al
+   * tick de useNow → un agente cruza el umbral solo, sin esperar un
+   * evento del bridge (que con un agente callado podría no llegar).
+   *
+   * Fallback a startedAtIso si el wire no trae lastActivityIso (snapshot
+   * viejo persistido antes de F3). Guard Number.isFinite: un ISO basura
+   * no debe marcar stale por la rama equivocada.
+   */
+  const staleAgentIds = computed<Set<string>>(() => {
+    void now.value;
+    const nowMs = Date.now();
+    const ids = new Set<string>();
+    for (const a of agents.value) {
+      if (a.status !== 'running') continue;
+      const lastIso = a.lastActivityIso ?? a.startedAtIso;
+      if (!lastIso) continue;
+      const lastMs = Date.parse(lastIso);
+      if (!Number.isFinite(lastMs)) continue;
+      if (nowMs - lastMs > STALE_AFTER_MS) ids.add(a.id);
+    }
+    return ids;
+  });
 
   const projectsByLifecycle = computed(() => {
     // Leemos now.value para que Vue cree la dependencia reactiva
@@ -359,6 +405,7 @@ export const useAgentsStore = defineStore('agents', () => {
     upNext,
     recent,
     recentFailedCount,
+    staleAgentIds,
     projectsByLifecycle,
     projects,
     totalCount,

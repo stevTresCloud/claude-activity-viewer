@@ -58,6 +58,13 @@ interface AgentState {
   sessionId?: string;
   startedAtMs: number;
   lastActivityMs: number;
+  /**
+   * true solo cuando vimos el SubagentStart real de este agente. Si es
+   * false, lo materializamos con un lazy-create (la extensión arrancó
+   * mid-flight) y `startedAtMs` es una estimación, no el arranque real →
+   * no podemos reportar una duración honesta al cerrar.
+   */
+  sawStart: boolean;
   /** transcript_path del SubagentStart — puerta al detalle en F3. */
   transcriptPath?: string;
   /** agent_transcript_path del SubagentStop — puerta al detalle en F3. */
@@ -130,6 +137,7 @@ export class HookTranslator {
     const state = this.createAgentState(event.agent_id, event.cwd, event.session_id, {
       name: event.agent_type,
       transcriptPath: event.transcript_path,
+      sawStart: true,
     });
     this.agents.set(event.agent_id, state);
 
@@ -145,7 +153,11 @@ export class HookTranslator {
       type: 'agent_status_changed',
       agentId,
       status: 'running',
-      metadata: { currentTool: event.tool_name, elapsedMs },
+      metadata: {
+        currentTool: event.tool_name,
+        elapsedMs,
+        lastActivityIso: new Date(nowMs).toISOString(),
+      },
     });
     events.push({
       type: 'agent_log',
@@ -178,7 +190,14 @@ export class HookTranslator {
       type: 'agent_status_changed',
       agentId,
       status: 'running',
-      metadata: { elapsedMs },
+      // Limpiamos currentTool ('' falsy → la UI esconde la línea): la tool
+      // ya terminó; mantener el nombre haría parecer que sigue en ella
+      // hasta el próximo PreToolUse.
+      metadata: {
+        currentTool: '',
+        elapsedMs,
+        lastActivityIso: new Date(nowMs).toISOString(),
+      },
     });
     return events;
   }
@@ -199,14 +218,27 @@ export class HookTranslator {
     state.agentTranscriptPath = event.agent_transcript_path;
 
     const nowMs = this.now();
-    const durationMs = nowMs - state.startedAtMs;
+    state.lastActivityMs = nowMs;
     const completedAtIso = new Date(nowMs).toISOString();
+    // Solo reportamos duración si vimos el arranque real. Si el Stop fue
+    // el primer evento (lazy-create), `startedAtMs` es ~ahora → un
+    // durationMs ~0 mentiría; lo dejamos undefined y la UI muestra "—".
+    const durationMs = state.sawStart ? nowMs - state.startedAtMs : undefined;
+
+    const metadata: Partial<AgentSnapshot> = {
+      completedAtIso,
+      lastActivityIso: completedAtIso,
+    };
+    if (durationMs !== undefined) {
+      metadata.durationMs = durationMs;
+      metadata.elapsedMs = durationMs;
+    }
 
     events.push({
       type: 'agent_status_changed',
       agentId: event.agent_id,
       status: 'done',
-      metadata: { completedAtIso, durationMs, elapsedMs: durationMs },
+      metadata,
     });
     events.push({
       type: 'agent_completed',
@@ -228,7 +260,7 @@ export class HookTranslator {
     agentId: string,
     cwd: string | undefined,
     sessionId: string | undefined,
-    opts?: { name?: string; transcriptPath?: string },
+    opts?: { name?: string; transcriptPath?: string; sawStart?: boolean },
   ): AgentState {
     const nowMs = this.now();
     const context = this.deriveContext(cwd ?? '');
@@ -242,6 +274,7 @@ export class HookTranslator {
       sessionId,
       startedAtMs: nowMs,
       lastActivityMs: nowMs,
+      sawStart: opts?.sawStart ?? false,
       transcriptPath: opts?.transcriptPath,
       terminal: false,
     };
@@ -315,6 +348,7 @@ export class HookTranslator {
       batchId: state.batchId,
       sessionId: state.sessionId,
       startedAtIso: new Date(state.startedAtMs).toISOString(),
+      lastActivityIso: new Date(state.lastActivityMs).toISOString(),
       elapsedMs: 0,
       tokensUsed: 0,
       contextUsedPct: 0,

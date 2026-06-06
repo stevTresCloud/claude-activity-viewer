@@ -27,6 +27,7 @@ import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
 import { useNow } from '../../composables/useNow';
 import { useShowDetail } from '../../composables/useShowDetail';
+import { useAgentsStore } from '../../stores/useAgentsStore';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -35,6 +36,12 @@ import AgentActionRow from './AgentActionRow.vue';
 const props = defineProps<{
   agent: Agent;
 }>();
+
+// Liveness: el agente sigue en NOW PLAYING pero lleva un rato sin
+// eventos de hook. No lo sacamos (puede estar en una tool larga); solo
+// frenamos el pulse/sweep y mostramos "idle" para no fingir actividad.
+const store = useAgentsStore();
+const isStale = computed(() => store.staleAgentIds.has(props.agent.id));
 
 // Click en el body de la card (no en botones de AgentActionRow,
 // que llevan @click.stop) abre el detail panel en un editor tab.
@@ -74,9 +81,10 @@ const elapsedText = computed(() => {
   >
     <!-- === L1: dot + name + model + elapsed === -->
     <div class="line line-1">
-      <StatusDot status="running" pulse />
+      <StatusDot status="running" :pulse="!isStale" />
       <span class="name">{{ agent.name }}</span>
       <ModelBadge v-if="agent.model" :model="agent.model" />
+      <span v-if="isStale" class="stale-hint" title="No recent hook activity">idle</span>
       <span class="elapsed">{{ elapsedText }}</span>
     </div>
 
@@ -98,7 +106,7 @@ const elapsedText = computed(() => {
     <div class="line indented actions">
       <AgentActionRow :agent="agent" />
       <div class="progress-track">
-        <div class="progress-bar sweep-bar" />
+        <div class="progress-bar sweep-bar" :class="{ paused: isStale }" />
       </div>
     </div>
   </div>
@@ -154,6 +162,14 @@ const elapsedText = computed(() => {
   flex-shrink: 0;
 }
 
+/* Hint "idle" cuando el agente lleva sin eventos > umbral de staleness. */
+.stale-hint {
+  font-size: 10px;
+  color: var(--foreground-muted);
+  font-style: italic;
+  flex-shrink: 0;
+}
+
 /* === L2/L3/L4 — indent ignorando el dot del L1 ===
  * Dot 7px + gap 6px = 13px, como dice HANDOFF §2.8.1. */
 .indented {
@@ -203,5 +219,10 @@ const elapsedText = computed(() => {
 }
 .sweep-bar {
   animation: sweep 1.6s ease-in-out infinite;
+}
+/* Agente stale: congelamos el sweep para no fingir progreso activo. */
+.sweep-bar.paused {
+  animation-play-state: paused;
+  opacity: 0.4;
 }
 </style>

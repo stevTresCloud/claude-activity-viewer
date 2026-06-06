@@ -245,6 +245,14 @@ describe('formatMessage', () => {
     );
   });
 
+  it('durationMs undefined omite el "in <duración>" en vez de mostrar 0s', () => {
+    // No vimos el arranque (lazy-create por Stop): mostrar "in 0s"
+    // mentiría sobre lo que tardó → mejor sin fragmento de duración.
+    const msg = formatMessage(eventBase({ name: 'X', durationMs: undefined, tokensUsed: 0 }));
+    expect(msg).toBe('Agent X finished');
+    expect(msg).not.toContain('in ');
+  });
+
   it('reason muy larga se trunca a ~60 chars', () => {
     const longReason = 'x'.repeat(200);
     const msg = formatMessage(

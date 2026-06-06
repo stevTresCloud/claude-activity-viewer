@@ -32,6 +32,7 @@ import type { Agent } from '../../types';
 import { formatElapsed } from '../../utils/format';
 import { useNow } from '../../composables/useNow';
 import { useShowDetail } from '../../composables/useShowDetail';
+import { useAgentsStore } from '../../stores/useAgentsStore';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
@@ -40,6 +41,10 @@ import AgentActionRow from './AgentActionRow.vue';
 const props = defineProps<{
   agent: Agent;
 }>();
+
+// Liveness: ver AgentCardRunning (variante in-group) para el porqué.
+const store = useAgentsStore();
+const isStale = computed(() => store.staleAgentIds.has(props.agent.id));
 
 // Click en el body abre el detail panel (mismo flujo que la
 // variante in-group; los botones de AgentActionRow llevan
@@ -76,9 +81,10 @@ const elapsedText = computed(() => {
   >
     <!-- === L1: dot + name + model + elapsed === -->
     <div class="line line-1">
-      <StatusDot status="running" pulse />
+      <StatusDot status="running" :pulse="!isStale" />
       <span class="name">{{ agent.name }}</span>
       <ModelBadge v-if="agent.model" :model="agent.model" />
+      <span v-if="isStale" class="stale-hint" title="No recent hook activity">idle</span>
       <span class="elapsed">{{ elapsedText }}</span>
     </div>
 
@@ -101,7 +107,7 @@ const elapsedText = computed(() => {
 
     <!-- === Sweep bar full-width pegado al borde inferior del card === -->
     <div class="sweep-track">
-      <div class="sweep-bar" />
+      <div class="sweep-bar" :class="{ paused: isStale }" />
     </div>
   </div>
 </template>
@@ -158,6 +164,14 @@ const elapsedText = computed(() => {
   flex-shrink: 0;
 }
 
+/* Hint "idle" cuando el agente lleva sin eventos > umbral de staleness. */
+.stale-hint {
+  font-size: 10px;
+  color: var(--foreground-muted);
+  font-style: italic;
+  flex-shrink: 0;
+}
+
 /* === L2/L3/L4 — indent debajo del dot 7px + gap 6px === */
 .indented {
   padding-left: 13px;
@@ -198,5 +212,10 @@ const elapsedText = computed(() => {
   width: 25%;
   background: var(--stripe-running);
   animation: sweep 1.6s ease-in-out infinite;
+}
+/* Agente stale: congelamos el sweep para no fingir progreso activo. */
+.sweep-bar.paused {
+  animation-play-state: paused;
+  opacity: 0.4;
 }
 </style>

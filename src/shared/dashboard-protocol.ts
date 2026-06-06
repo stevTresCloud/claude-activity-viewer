@@ -166,6 +166,15 @@ export interface AgentSnapshot {
   startedAtIso?: string;
   /** Tiempo transcurrido desde startedAtIso al momento del último update. */
   elapsedMs?: number;
+  /**
+   * ISO 8601 del último evento de hook que el viewer procesó para este
+   * agente (start, tool, stop). El webview lo usa para la heurística de
+   * liveness: un agente `running` cuyo `lastActivityIso` quedó hace más
+   * del umbral de staleness se pinta como "sin actividad reciente" (no
+   * terminal — puede seguir vivo en una tool larga). No hay heartbeat:
+   * el único "sigue vivo" que tenemos es el próximo evento de hook.
+   */
+  lastActivityIso?: string;
   /** % del context window usado (0-100). */
   contextUsedPct?: number;
   /**
@@ -278,7 +287,14 @@ export interface LogEntry {
  */
 export interface AgentCompletedResult {
   status: Exclude<AgentStatus, 'running' | 'pending'>;
-  durationMs: number;
+  /**
+   * Duración total del agente. Opcional: cuando la extensión arrancó
+   * mid-flight y el primer evento que vio fue el SubagentStop, no sabemos
+   * cuándo arrancó el agente, así que la omitimos en vez de reportar ~0
+   * (la UI muestra "—" en vez de "0s"). Cuando sí vimos el start, va el
+   * delta real.
+   */
+  durationMs?: number;
   tokensUsed: number;
   reason?: string;
 }

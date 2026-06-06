@@ -188,6 +188,47 @@ describe('PostToolUse', () => {
     if (log.type !== 'agent_log') throw new Error('unreachable');
     expect(log.entry.isError).toBe(true);
   });
+
+  it('clears currentTool when the tool finishes', () => {
+    const { translator } = makeTranslator();
+    translator.translate(ev({ hook_event_name: 'SubagentStart', agent_id: 'a-1' }));
+    translator.translate(
+      ev({ hook_event_name: 'PreToolUse', agent_id: 'a-1', tool_name: 'Read' }),
+    );
+    const out = translator.translate(
+      ev({
+        hook_event_name: 'PostToolUse',
+        agent_id: 'a-1',
+        tool_name: 'Read',
+        tool_response: 'ok',
+      }),
+    );
+    const status = out[1];
+    if (status.type !== 'agent_status_changed') throw new Error('unreachable');
+    // '' (falsy) → la UI esconde la línea del tool entre tool y tool.
+    expect(status.metadata?.currentTool).toBe('');
+  });
+});
+
+describe('lastActivityIso (liveness)', () => {
+  it('stamps lastActivityIso on the created snapshot and on each event', () => {
+    const { translator, setNow } = makeTranslator();
+    setNow(1000);
+    const createdOut = translator.translate(
+      ev({ hook_event_name: 'SubagentStart', agent_id: 'a-1' }),
+    );
+    const created = createdOut[0];
+    if (created.type !== 'agent_created') throw new Error('unreachable');
+    expect(created.agent.lastActivityIso).toBe(new Date(1000).toISOString());
+
+    setNow(2500);
+    const preOut = translator.translate(
+      ev({ hook_event_name: 'PreToolUse', agent_id: 'a-1', tool_name: 'Read' }),
+    );
+    const status = preOut[0];
+    if (status.type !== 'agent_status_changed') throw new Error('unreachable');
+    expect(status.metadata?.lastActivityIso).toBe(new Date(2500).toISOString());
+  });
 });
 
 describe('SubagentStop', () => {
@@ -227,6 +268,37 @@ describe('SubagentStop', () => {
       'agent_status_changed',
       'agent_completed',
     ]);
+  });
+
+  it('omits durationMs when Stop is the first event seen (no observed start)', () => {
+    const { translator, setNow } = makeTranslator();
+    setNow(5000);
+    const out = translator.translate(
+      ev({ hook_event_name: 'SubagentStop', agent_id: 'ghost-1' }),
+    );
+    const status = out[1];
+    const completed = out[2];
+    if (status.type !== 'agent_status_changed') throw new Error('unreachable');
+    if (completed.type !== 'agent_completed') throw new Error('unreachable');
+    // completedAtIso sí lo sabemos (es ahora); durationMs NO (no vimos el
+    // arranque) → se omite en vez de mentir con ~0.
+    expect(status.metadata?.completedAtIso).toBe(new Date(5000).toISOString());
+    expect(status.metadata?.durationMs).toBeUndefined();
+    expect(status.metadata?.elapsedMs).toBeUndefined();
+    expect(completed.result.durationMs).toBeUndefined();
+  });
+
+  it('keeps durationMs when the start was observed', () => {
+    const { translator, setNow } = makeTranslator();
+    setNow(1000);
+    translator.translate(ev({ hook_event_name: 'SubagentStart', agent_id: 'a-1' }));
+    setNow(4000);
+    const out = translator.translate(
+      ev({ hook_event_name: 'SubagentStop', agent_id: 'a-1' }),
+    );
+    const completed = out[1];
+    if (completed.type !== 'agent_completed') throw new Error('unreachable');
+    expect(completed.result.durationMs).toBe(3000);
   });
 
   it('preserves session_id when lazy-creating from SubagentStop', () => {
