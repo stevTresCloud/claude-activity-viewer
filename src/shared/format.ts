@@ -161,6 +161,25 @@ export function truncate(s: string, max: number): string {
 }
 
 /**
+ * Sentinel de sessionId ausente. El wire mantiene `sessionId?: string`
+ * opcional (distingue "el SDK no lo emitió aún" de un id real, necesario
+ * para el dedup de sesiones de disco); este valor es el fallback de
+ * agrupación/display cuando falta. SSoT para que los productores
+ * (groupAgents, Toolbar) y los consumidores (headers) coincidan.
+ */
+export const UNKNOWN_SESSION = 'unknown';
+
+/**
+ * Forma corta de un sessionId para mostrar en headers (primeros 8 chars
+ * del UUID). El sentinel UNKNOWN_SESSION y el string vacío caen al
+ * sentinel (un id ausente no debe renderizar una línea en blanco).
+ */
+export function formatShortSession(session: string): string {
+  if (!session || session === UNKNOWN_SESSION) return UNKNOWN_SESSION;
+  return session.slice(0, 8);
+}
+
+/**
  * HH:mm:ss.sss en hora local. Usado como prefijo de cada línea del log
  * del extension host para que sea grep-friendly y se pueda correlacionar
  * con otros logs del sistema (Output channel + claude --debug + journalctl).

@@ -23,39 +23,29 @@
  *     basta con el counter (12) y el FailedBadge "1 FAILED" en rojo
  *     del header.
  *
- * La agrupación de NOW/UP por (project + task + branch + batchId) se
- * hace inline acá; el bloque son ~12 líneas y extraer a composable
- * sería abstracción especulativa para un solo call site.
+ * La agrupación de NOW/UP/RECENT por (project + sessionId + cwd)
+ * se delega a `groupAgents` del store (función pura exportada).
  */
 
 import { computed, ref } from 'vue';
-import { useAgentsStore } from '../stores/useAgentsStore';
-import type { Agent } from '../types';
+import { useAgentsStore, groupAgents } from '../stores/useAgentsStore';
 import SectionHeader from '../components/sections/SectionHeader.vue';
 import ProjectGroup from '../components/sections/ProjectGroup.vue';
 import ProjectGroupHeader from '../components/sections/ProjectGroupHeader.vue';
 import AgentCardRunning from '../components/cards/AgentCardRunning.vue';
 import AgentCardPending from '../components/cards/AgentCardPending.vue';
 import AgentCardRecent from '../components/cards/AgentCardRecent.vue';
-import { postToExtension } from '../composables/usePostToExtension';
 
 const store = useAgentsStore();
 
 // === Discoverability hint cuando dashboard está vacío ===
 //
 // El hint aparece al fondo cuando totalCount=0 (primer install o
-// recién después de un Rescan que limpió RECENT). Antes mostrábamos
-// un empty-state global que reemplazaba las 3 secciones; ahora las
-// secciones se ven siempre y el hint queda discreto al final. El
-// botón "Run Test Agent" dispara el comando palette via postMessage —
-// ahorra un Ctrl+Shift+P a usuarios que recién instalaron y no saben
-// que pueden lanzar un agente local de prueba sin armar un chat.
+// recién después de un Rescan que limpió RECENT). Las 3 secciones se
+// ven siempre y el hint queda discreto al final, explicando cómo
+// spawnar agentes desde el chat de Claude Code.
 
 const isDashboardEmpty = computed(() => store.totalCount === 0);
-
-function runTestAgent(): void {
-  postToExtension({ type: 'request_run_test_agent' });
-}
 
 // === Estado de colapso por sección ===
 //
@@ -65,44 +55,6 @@ function runTestAgent(): void {
 const nowPlayingOpen = ref(true);
 const upNextOpen = ref(true);
 const recentOpen = ref(false);
-
-// === Helper de grouping (inline) ===
-//
-// Agrupa una lista de agentes en buckets por la clave
-// `project|task|branch|batchId`. Mantiene el orden de la primera
-// aparición de cada clave para que el render sea estable.
-//
-// Devuelve `Array<{ key, project, task, branch, agents }>` para que
-// el v-for use el key estable y los project group headers tomen los
-// 3 strings de un solo lugar.
-
-interface GroupedAgents {
-  key: string;
-  project: string;
-  task: string;
-  branch: string;
-  agents: Agent[];
-}
-
-function groupAgents(agents: Agent[]): GroupedAgents[] {
-  const byKey = new Map<string, GroupedAgents>();
-  for (const agent of agents) {
-    const key = `${agent.project}|${agent.task}|${agent.branch}|${agent.batchId}`;
-    let group = byKey.get(key);
-    if (!group) {
-      group = {
-        key,
-        project: agent.project,
-        task: agent.task,
-        branch: agent.branch,
-        agents: [],
-      };
-      byKey.set(key, group);
-    }
-    group.agents.push(agent);
-  }
-  return Array.from(byKey.values());
-}
 
 const nowPlayingGroups = computed(() => groupAgents(store.nowPlaying));
 const upNextGroups = computed(() => groupAgents(store.upNext));
@@ -125,7 +77,7 @@ const recentGroups = computed(() => groupAgents(store.recent));
         <template #header>
           <ProjectGroupHeader
             :project="group.project"
-            :task="group.task"
+            :session-id="group.sessionId"
             :branch="group.branch"
           />
         </template>
@@ -154,7 +106,7 @@ const recentGroups = computed(() => groupAgents(store.recent));
         <template #header>
           <ProjectGroupHeader
             :project="group.project"
-            :task="group.task"
+            :session-id="group.sessionId"
             :branch="group.branch"
           />
         </template>
@@ -184,7 +136,7 @@ const recentGroups = computed(() => groupAgents(store.recent));
         <template #header>
           <ProjectGroupHeader
             :project="group.project"
-            :task="group.task"
+            :session-id="group.sessionId"
             :branch="group.branch"
           />
         </template>
@@ -207,12 +159,8 @@ const recentGroups = computed(() => groupAgents(store.recent));
       <p class="empty-hint-title">No agents yet.</p>
       <p class="empty-hint-msg">
         Spawn agents from your Claude Code chat with the
-        <code>spawn_agents</code> tool, or run a quick local test:
+        <code>spawn_agents</code> tool.
       </p>
-      <button class="empty-hint-button" @click="runTestAgent">
-        <i class="codicon codicon-rocket" />
-        Run Test Agent
-      </button>
     </div>
   </div>
 </template>
@@ -238,10 +186,10 @@ const recentGroups = computed(() => groupAgents(store.recent));
 }
 
 /* ===========================================================
-   === Empty hint con CTA                                  ===
+   === Empty hint                                          ===
    Aparece al final cuando totalCount=0. Diseño minimal:
-   título + mensaje pequeño + botón claro. NO compite
-   visualmente con las secciones del kanban (más arriba).    ===
+   título + mensaje pequeño. NO compite visualmente con las
+   secciones del kanban (más arriba).                        ===
    =========================================================== */
 .empty-hint {
   padding: 24px 16px;
@@ -276,27 +224,4 @@ const recentGroups = computed(() => groupAgents(store.recent));
   border-radius: 3px;
 }
 
-.empty-hint-button {
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  margin-top: 8px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  background: var(--button-background, var(--vscode-button-background));
-  color: var(--button-foreground, var(--vscode-button-foreground));
-  border: none;
-  border-radius: 2px;
-  cursor: pointer;
-}
-
-.empty-hint-button:hover {
-  background: var(--button-hover, var(--vscode-button-hoverBackground));
-}
-
-.empty-hint-button .codicon {
-  font-size: 14px;
-}
 </style>

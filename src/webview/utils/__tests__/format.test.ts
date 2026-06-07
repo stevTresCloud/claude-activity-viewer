@@ -17,7 +17,14 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatCostUsd, formatElapsed, formatRelative, formatTokens } from '../format';
+import {
+  formatCostUsd,
+  formatElapsed,
+  formatRelative,
+  formatShortSession,
+  formatTokens,
+  UNKNOWN_SESSION,
+} from '../format';
 
 // =====================================================================
 // === formatElapsed ===================================================
@@ -195,5 +202,25 @@ describe('formatCostUsd', () => {
     expect(formatCostUsd(0, 'done')).toBe('$0.00');
     expect(formatCostUsd(0, 'failed')).toBe('$0.00');
     expect(formatCostUsd(0, 'cancelled')).toBe('$0.00');
+  });
+});
+
+// === formatShortSession =============================================
+
+describe('formatShortSession', () => {
+  it('UUID → primeros 8 chars', () => {
+    expect(formatShortSession('aaaabbbb-1111-2222-3333-444455556666')).toBe('aaaabbbb');
+  });
+
+  it('sentinel UNKNOWN_SESSION pasa sin cortar', () => {
+    expect(formatShortSession(UNKNOWN_SESSION)).toBe(UNKNOWN_SESSION);
+  });
+
+  it('string vacío cae al sentinel (no línea en blanco)', () => {
+    expect(formatShortSession('')).toBe(UNKNOWN_SESSION);
+  });
+
+  it('id más corto que 8 chars se devuelve intacto', () => {
+    expect(formatShortSession('abc')).toBe('abc');
   });
 });

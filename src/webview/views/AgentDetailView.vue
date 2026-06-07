@@ -6,8 +6,7 @@
  * Responsabilidades:
  *   1. Pedir hidratación del log al bridge cuando monta
  *      (`request_hydrate_logs`).
- *   2. Renderear header con name + project · branch + status badge +
- *      botón Cancel inline si running.
+ *   2. Renderear header con name + project · branch + status badge.
  *   3. Pasar el log per-agent al LogStream para renderear el stream.
  *
  * El AgentId viene inyectado en window al construir el panel
@@ -73,18 +72,8 @@ const STATUS_DOT_KIND = {
 const dotKind = computed(() => {
   const a = agent.value;
   if (!a) return 'done';
-  return STATUS_DOT_KIND[a.status] ?? 'done';
+  return STATUS_DOT_KIND[a.status];
 });
-
-// === Handlers footer ===
-function onCancel(): void {
-  if (!agent.value || agent.value.status !== 'running') return;
-  postToExtension({ type: 'request_cancel', agentId: agent.value.id });
-}
-function onOpenInChat(): void {
-  if (!agent.value?.sessionId) return;
-  postToExtension({ type: 'request_open', agentId: agent.value.id });
-}
 
 // === Hidratación inicial ===
 //
@@ -98,7 +87,6 @@ onMounted(() => {
 });
 
 const isRunning = computed(() => agent.value?.status === 'running');
-const hasSessionId = computed(() => !!agent.value?.sessionId);
 </script>
 
 <template>
@@ -157,28 +145,6 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
 
     <!-- === Body: LogStream con auto-scroll === -->
     <LogStream :entries="logEntries" class="stream" />
-
-    <!-- === Footer: acciones contextuales === -->
-    <footer class="footer">
-      <button
-        v-if="hasSessionId"
-        type="button"
-        class="ftr-btn"
-        @click="onOpenInChat"
-      >
-        <i class="codicon codicon-link-external" />
-        Open in Claude chat
-      </button>
-      <button
-        v-if="isRunning"
-        type="button"
-        class="ftr-btn destructive"
-        @click="onCancel"
-      >
-        <i class="codicon codicon-close" />
-        Cancel agent
-      </button>
-    </footer>
   </div>
 </template>
 
@@ -320,39 +286,4 @@ const hasSessionId = computed(() => !!agent.value?.sessionId);
   min-height: 0;
 }
 
-/* === Footer === */
-.footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--border-subtle);
-  flex-shrink: 0;
-}
-.ftr-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  font-size: 12px;
-  font-family: var(--font-ui);
-  background: var(--background-button-secondary);
-  color: var(--foreground);
-  border: 1px solid var(--border-subtle);
-  border-radius: 3px;
-  cursor: pointer;
-}
-.ftr-btn:hover {
-  background: rgb(255 255 255 / 0.06);
-}
-.ftr-btn.destructive {
-  color: var(--color-error);
-  border-color: rgb(244 67 54 / 0.4);
-}
-.ftr-btn.destructive:hover {
-  background: rgb(244 67 54 / 0.1);
-}
-.ftr-btn .codicon {
-  font-size: 12px;
-}
 </style>

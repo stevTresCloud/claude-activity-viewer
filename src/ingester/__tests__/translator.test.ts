@@ -63,7 +63,6 @@ describe('SubagentStart', () => {
       status: 'running',
       project: 'proj@/home/u/proj',
       branch: 'main',
-      batchId: 's-1',
       sessionId: 's-1',
       elapsedMs: 0,
     });
@@ -309,7 +308,6 @@ describe('SubagentStop', () => {
     const created = out[0];
     if (created.type !== 'agent_created') throw new Error('unreachable');
     expect(created.agent.sessionId).toBe('sess-9');
-    expect(created.agent.batchId).toBe('sess-9');
   });
 
   it('ignores events after an agent is terminal', () => {

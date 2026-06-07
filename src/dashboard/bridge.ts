@@ -45,17 +45,11 @@ const PERSIST_DEBOUNCE_MS = 500;
 /**
  * Forma del snapshot que persistimos en `context.globalState`.
  * Reusa `AgentSnapshot` (el del wire) más el log bounded — así un
- * reload del webview puede reconstruir state + detail panel.
- *
- * `cwd` y `prompt` viven acá pero NO en el wire. Para agentes
- * observados por hooks quedan vacíos hoy (el payload del hook no los
- * thread-ea al wire `AgentSnapshot`); `getResumeTarget` los usa como
- * best-effort. Threadearlos para "open live agent" es trabajo de F3.
+ * reload del webview puede reconstruir state + detail panel. El cwd
+ * vive en `snapshot.cwd` (wire); no se duplica acá.
  */
 interface StoredAgent {
   snapshot: AgentSnapshot;
-  cwd: string;
-  prompt: string;
   log: LogEntry[];
 }
 
@@ -219,8 +213,6 @@ export class DashboardBridge {
 
       this.agents.set(entry.snapshot.id, {
         snapshot: entry.snapshot,
-        cwd: entry.cwd ?? '',
-        prompt: entry.prompt ?? '',
         log: entry.log ?? [],
       });
     }
@@ -346,8 +338,6 @@ export class DashboardBridge {
     }
     this.agents.set(snapshot.id, {
       snapshot: { ...snapshot },
-      cwd: '',
-      prompt: '',
       log: [],
     });
     this.post({ type: 'agent_created', agent: { ...snapshot } });
@@ -468,9 +458,8 @@ export class DashboardBridge {
     this.mutateSnapshot(agentId, result.status, metadata);
     this.post({ type: 'agent_completed', agentId, result });
     // notifyCompletion (toast) solo para los 3 estados terminales con
-    // payload de cierre. `needs_review` es del flujo de verificación del
-    // orquestador (retirado) y nunca lo emite el ingester; el guard
-    // además narrowea el tipo a la firma de AgentCompletionEvent.
+    // payload de cierre. El guard además narrowea el tipo a la firma
+    // de AgentCompletionEvent.
     if (
       stored &&
       (result.status === 'done' ||
@@ -490,38 +479,6 @@ export class DashboardBridge {
     this.notifyRunningCount();
   }
 
-  // ====================================================================
-  // === Consultas / acciones de la UI ==================================
-  // ====================================================================
-
-  /**
-   * No-op en el viewer read-only: no spawneamos agentes, así que no hay
-   * subprocess que abortar. Se conserva porque el scanner-controller lo
-   * llama desde el handler `request_cancel`; devuelve `false` (nada que
-   * cancelar). Limpiar el botón cancel de la UI es trabajo de F3.
-   */
-  cancel(_agentId: string): boolean {
-    return false;
-  }
-
-  /**
-   * Info que el handler `request_open` necesita (sessionId + cwd) para
-   * abrir/resumir la sesión del agente observado. `cwd` queda vacío para
-   * agentes del ingester hasta que F3 lo thread-ee por el wire.
-   * Retorna `null` si el agentId no existe.
-   */
-  getResumeTarget(
-    agentId: string,
-  ): { sessionId?: string; cwd: string; name: string } | null {
-    const stored = this.agents.get(agentId);
-    if (!stored) return null;
-    return {
-      sessionId: stored.snapshot.sessionId,
-      cwd: stored.cwd,
-      name: stored.snapshot.name,
-    };
-  }
-
   /**
    * Emite el ringbuffer completo de logs de un agente como un único
    * `agent_log_history`. Llamado on-demand cuando el detail panel se
@@ -533,6 +490,14 @@ export class DashboardBridge {
    *
    * No-op coherente si el agentId no existe (emite `entries: []`).
    */
+  /**
+   * Nombre del agente para títulos de UI (ej. tab del detail panel).
+   * Devuelve null si el agentId no está en el registry.
+   */
+  getAgentName(agentId: string): string | null {
+    return this.agents.get(agentId)?.snapshot.name ?? null;
+  }
+
   hydrateLogs(agentId: string, targetWebview?: vscode.Webview): void {
     const stored = this.agents.get(agentId);
     const entries = stored ? [...stored.log] : [];

@@ -44,9 +44,10 @@ export class DetailPanelManager implements vscode.Disposable {
     private readonly channel: vscode.OutputChannel,
     /**
      * Callback que recibe mensajes del webview del panel detail.
-     * Mismo handler que el sidebar (request_cancel, request_open,
-     * request_hydrate_logs, etc.). La extension.ts lo apunta al
-     * scanner-controller.
+     * Mismo handler que el sidebar (request_resume_session,
+     * request_rescan, etc.). La extension.ts lo apunta al
+     * scanner-controller. `request_hydrate_logs` se intercepta antes
+     * (ver onDidReceiveMessage abajo).
      */
     private readonly onWebviewMessage?: (
       msg: DashboardEventToExtension,
@@ -102,22 +103,11 @@ export class DetailPanelManager implements vscode.Disposable {
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'resources', 'icon.svg');
     // Builder compartido inyecta el script con `window.__claudeOrchestrator`
     // que el bundle Vue lee via `useDetailMode` para arrancar
-    // AgentDetailView en lugar de la sidebar default. Propagamos `flags`
-    // con la misma simetría que dashboard.ts para que cualquier feature
-    // flag futuro vea el mismo valor en sidebar y en detail (hoy
-    // `showTransportState` solo lo renderiza el sidebar; tener el flag
-    // disponible acá previene un trap si se hoistea el banner).
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    // AgentDetailView en lugar de la sidebar default.
     panel.webview.html = buildWebviewHtml({
       webview: panel.webview,
       extensionUri: this.extensionUri,
-      inlineConfig: {
-        mode: 'detail',
-        agentId,
-        flags: {
-          showTransportState: cfg.get<boolean>('showTransportState', false),
-        },
-      },
+      inlineConfig: { mode: 'detail', agentId },
     });
 
     // El bridge incorpora el webview al broadcast set. Recibirá los

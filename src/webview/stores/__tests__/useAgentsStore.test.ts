@@ -31,7 +31,7 @@ vi.mock('../../composables/useNow', () => ({
   useNow: () => ref(0),
 }));
 
-import { useAgentsStore } from '../useAgentsStore';
+import { useAgentsStore, groupAgents } from '../useAgentsStore';
 import type { AgentSnapshot } from '../../../shared/dashboard-protocol';
 
 // =====================================================================
@@ -51,7 +51,6 @@ function snap(overrides: Partial<AgentSnapshot> & { id: string }): AgentSnapshot
     project: 'proj',
     task: '',
     branch: '',
-    batchId: 'b-1',
     startedAtIso: FIXED_STARTED_AT_ISO,
     elapsedMs: 0,
     tokensUsed: 0,
@@ -469,5 +468,87 @@ describe('useAgentsStore — staleAgentIds', () => {
       snap({ id: 'a', status: 'running', lastActivityIso: 'not-an-iso' }),
     ]);
     expect(store.staleAgentIds.has('a')).toBe(false);
+  });
+});
+
+// =====================================================================
+// === groupAgents (función pura) ======================================
+// =====================================================================
+//
+// groupAgents no necesita Pinia — es una función pura. No se
+// necesita beforeEach ni setActivePinia acá.
+
+describe('groupAgents', () => {
+  it('agrupa agentes del mismo project+sessionId+cwd en un grupo', () => {
+    const agents = [
+      snap({ id: 'a1', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/A', branch: 'main', status: 'running' }),
+      snap({ id: 'a2', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/A', branch: 'main', status: 'running' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].project).toBe('proj-A');
+    expect(groups[0].sessionId).toBe('sid-1');
+    expect(groups[0].cwd).toBe('/w/A');
+    expect(groups[0].agents).toHaveLength(2);
+  });
+
+  it('crea grupos distintos para project+sessionId+cwd distintos', () => {
+    const agents = [
+      snap({ id: 'a1', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/A', branch: 'main', status: 'running' }),
+      snap({ id: 'b1', project: 'proj-B', sessionId: 'sid-2', cwd: '/w/B', branch: 'feat', status: 'running' }),
+      snap({ id: 'c1', project: 'proj-A', sessionId: 'sid-3', cwd: '/w/A', branch: 'main', status: 'done' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups).toHaveLength(3);
+    const keys = groups.map((g) => g.key);
+    expect(keys).toContain('proj-A|sid-1|/w/A');
+    expect(keys).toContain('proj-B|sid-2|/w/B');
+    expect(keys).toContain('proj-A|sid-3|/w/A');
+  });
+
+  it('sessionId faltante (undefined) → grupo con sessionId="unknown"', () => {
+    const agents = [
+      snap({ id: 'a1', project: 'proj-A', sessionId: undefined, cwd: '/w/A', branch: 'main', status: 'pending' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessionId).toBe('unknown');
+    expect(groups[0].key).toBe('proj-A|unknown|/w/A');
+  });
+
+  it('sessionId="" (string vacío válido per schema) → cae al sentinel "unknown"', () => {
+    const agents = [
+      snap({ id: 'a1', project: 'proj-A', sessionId: '', cwd: '/w/A', branch: 'main', status: 'running' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessionId).toBe('unknown');
+    expect(groups[0].key).toBe('proj-A|unknown|/w/A');
+  });
+
+  it('multi-cwd: mismo project+sessionId, cwd distintos → grupos separados', () => {
+    const agents = [
+      snap({ id: 'a1', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/A', branch: 'main', status: 'running' }),
+      snap({ id: 'a2', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/B', branch: 'main', status: 'running' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups).toHaveLength(2);
+    const cwds = groups.map((g) => g.cwd);
+    expect(cwds).toContain('/w/A');
+    expect(cwds).toContain('/w/B');
+  });
+
+  it('lista vacía → array vacío', () => {
+    expect(groupAgents([])).toHaveLength(0);
+  });
+
+  it('mantiene el orden de primera aparición de cada clave', () => {
+    const agents = [
+      snap({ id: 'b1', project: 'proj-B', sessionId: 'sid-2', cwd: '/w/B', branch: 'feat', status: 'running' }),
+      snap({ id: 'a1', project: 'proj-A', sessionId: 'sid-1', cwd: '/w/A', branch: 'main', status: 'running' }),
+    ];
+    const groups = groupAgents(agents);
+    expect(groups[0].project).toBe('proj-B');
+    expect(groups[1].project).toBe('proj-A');
   });
 });

@@ -11,20 +11,19 @@
  * Estructura (HANDOFF §5 + §2.15):
  *
  *   ┌─ Title row ──────────────────────────────┐
- *   │ CLAUDE AGENTS                  + ⤴ ⋯    │
+ *   │ CLAUDE AGENTS                  ⟳ ▽ ⋯    │
  *   ├─ Selector row ───────────────────────────┤
  *   │ Project: [ trigger          ▼ ]          │
  *   ├─ Context line (solo Single project) ─────┤
- *   │ tarea_10794 · feature/SL-10794           │
+ *   │ a1b2c3d4 · feature/SL-10794              │
  *   └──────────────────────────────────────────┘
  *
  * La context line aparece SOLO cuando hay filtro activo. Su
- * contenido (task / branch / fallback) se deriva acá mirando los
- * agentes del proyecto seleccionado.
+ * contenido (sessionId corto / branch / fallback) se deriva acá
+ * mirando los agentes del proyecto seleccionado.
  *
- * Los 3 botones del title row (+ ⤴ ⋯) son decorativos por ahora;
- * los handlers se cablean cuando exista la UX para "new batch",
- * filtros adicionales y menú de más acciones.
+ * El botón rescan (⟳) es funcional; filtro (▽) y más (⋯) son
+ * decorativos por ahora.
  */
 
 import { computed, ref, watch } from 'vue';
@@ -33,26 +32,13 @@ import { useScannerStore } from '../stores/useScannerStore';
 import { useProjectFilter } from '../composables/useProjectFilter';
 import { useNow } from '../composables/useNow';
 import { postToExtension } from '../composables/usePostToExtension';
-import { formatRelative } from '../utils/format';
+import { formatRelative, UNKNOWN_SESSION } from '../utils/format';
 import ProjectSelector from './selector/ProjectSelector.vue';
 import ProjectContextLine from './sections/ProjectContextLine.vue';
 
 const store = useAgentsStore();
 const scanner = useScannerStore();
 const { selectedProjectId } = useProjectFilter();
-
-// === Feature flag: banner del transport degraded ===
-//
-// Default false hasta validar la heurística en uso productivo. El
-// extension inyecta el valor del setting `claudeOrchestrator.show
-// TransportState` via `window.__claudeOrchestrator.flags` al construir
-// el HTML del webview (ver src/views/dashboard.ts).
-const showTransportBanner = computed<boolean>(() => {
-  const flagOn = typeof window !== 'undefined'
-    ? window.__claudeOrchestrator?.flags?.showTransportState === true
-    : false;
-  return flagOn && store.transportState === 'degraded';
-});
 
 // === Resolver projectName del id seleccionado ===
 
@@ -63,20 +49,18 @@ const selectedProjectName = computed<string | null>(() => {
   );
 });
 
-// === Derivación de la context line (task / branch / fallback) ===
+// === Derivación de la context line (session / branch / fallback) ===
 //
 // Mira TODOS los agentes del proyecto (running + pending + recent).
-// Agrupa por la combinación task+branch.
-//   - Si todos comparten la misma combinación → muestra "task · branch".
-//   - Si hay >1 combinación distinta             → fallback "N tasks ·
-//     multiple branches" donde N = cantidad de tasks únicas.
-//   - Si el proyecto no tiene agentes (caso teórico al estar
-//     filtrado a uno con 0 agentes) → null y la línea se oculta.
+// Agrupa por la combinación sessionId+branch.
+//   - Si todos comparten la misma combinación → muestra "sessionId · branch".
+//   - Si hay >1 combinación distinta → fallback N sessions.
+//   - Si el proyecto no tiene agentes → null y la línea se oculta.
 
 interface ContextInfo {
-  task: string | null;
+  session: string | null;
   branch: string | null;
-  taskCount: number;
+  sessionCount: number;
 }
 
 // === Rescan button state ===
@@ -111,10 +95,6 @@ function onRescan(): void {
   }, 5_000);
 }
 
-function onInjectClaudeMd(): void {
-  postToExtension({ type: 'request_inject_claude_md' });
-}
-
 // Cuando llega un evento `projects_from_disk` o `sessions_from_disk`,
 // el store actualiza `lastScanIso`. Observamos eso para apagar el
 // spinner antes del timeout. Usar watch acá evita depender del
@@ -133,42 +113,29 @@ const contextInfo = computed<ContextInfo | null>(() => {
   );
   if (projectAgents.length === 0) return null;
 
-  const uniqueTasks = new Set(projectAgents.map((a) => a.task));
+  // `||` (no `??`): un sessionId '' cae al sentinel, igual que en groupAgents.
+  const uniqueSessions = new Set(projectAgents.map((a) => a.sessionId || UNKNOWN_SESSION));
   const uniqueBranches = new Set(projectAgents.map((a) => a.branch));
 
-  if (uniqueTasks.size === 1 && uniqueBranches.size === 1) {
+  if (uniqueSessions.size === 1 && uniqueBranches.size === 1) {
     return {
-      task: projectAgents[0].task,
+      session: projectAgents[0].sessionId || UNKNOWN_SESSION,
       branch: projectAgents[0].branch,
-      taskCount: 1,
+      sessionCount: 1,
     };
   }
 
   return {
-    task: null,
+    session: null,
     branch: null,
-    taskCount: uniqueTasks.size,
+    sessionCount: uniqueSessions.size,
   };
 });
 </script>
 
 <template>
   <div class="toolbar">
-    <!-- === Banner heurístico del transport degraded ===
-         Visible solo si el setting claudeOrchestrator.showTransportState
-         está activo Y el bridge marcó transportState='degraded' (un
-         wait_for_agents lleva >60s sin resolver). El user lo lee y
-         decide: re-invocar wait_for_agents desde el chat (la idempotency
-         del server recoge el waiter existente) o cancelar manual. -->
-    <div v-if="showTransportBanner" class="transport-banner" role="status">
-      <i class="codicon codicon-warning" />
-      <span class="banner-text">
-        Transport may be slow — agents still running. Re-invoke
-        <code>wait_for_agents</code> from chat to resume the long-poll.
-      </span>
-    </div>
-
-    <!-- === Title row + scan label + 3 botones === -->
+    <!-- === Title row + scan label + botones === -->
     <div class="title-row">
       <span class="title">CLAUDE AGENTS</span>
       <span class="scan-label" :class="{ 'is-scanning': scanning }">
@@ -190,20 +157,6 @@ const contextInfo = computed<ContextInfo | null>(() => {
         >
           <i class="codicon codicon-refresh" />
         </button>
-        <!-- Inject CLAUDE.md: atajo al re-scan del injector. Útil
-             cuando el user abre un workspace nuevo y quiere asegurar
-             que la directiva está en su CLAUDE.md sin invocar el
-             palette. Modo update-existing-only (no crea archivos
-             nuevos — para eso el palette completo). -->
-        <button
-          type="button"
-          class="toolbar-btn"
-          aria-label="Inject MCP directive into workspace CLAUDE.md"
-          title="Inject MCP directive into workspace CLAUDE.md (updates existing files only)"
-          @click="onInjectClaudeMd"
-        >
-          <i class="codicon codicon-rocket" />
-        </button>
         <button type="button" class="toolbar-btn" aria-label="filter">
           <i class="codicon codicon-filter" />
         </button>
@@ -222,9 +175,9 @@ const contextInfo = computed<ContextInfo | null>(() => {
     <!-- === Context line — solo cuando hay filtro activo === -->
     <ProjectContextLine
       v-if="contextInfo"
-      :task="contextInfo.task"
+      :session="contextInfo.session"
       :branch="contextInfo.branch"
-      :task-count="contextInfo.taskCount"
+      :session-count="contextInfo.sessionCount"
     />
   </div>
 </template>
@@ -328,32 +281,4 @@ const contextInfo = computed<ContextInfo | null>(() => {
   flex-shrink: 0;
 }
 
-/* === Transport degraded banner ===
- * Hereda --color-warning del theme (mapeado a vscode-editorWarning-foreground)
- * para que se adapte light / high-contrast / custom themes. `color-mix` deja
- * componer alpha sobre el token sin pisarlo (Tailwind v4 no permite el
- * `rgb(var(--...) / a)` shorthand). */
-.transport-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 35%, transparent);
-  color: var(--color-warning);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.transport-banner .codicon {
-  font-size: 14px;
-  line-height: 1.4;
-  flex-shrink: 0;
-}
-.banner-text code {
-  font-family: var(--font-mono, monospace);
-  font-size: 10px;
-  padding: 0 3px;
-  background: rgb(0 0 0 / 0.2);
-  border-radius: 2px;
-}
 </style>

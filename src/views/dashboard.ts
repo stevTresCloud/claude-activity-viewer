@@ -64,22 +64,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     };
 
     // === Carga del HTML compilado ===
-    // Builder compartido (`webview-html.ts`) lee el index.html del
-    // bundle Vite, reescribe paths assets/ a `vscode-webview://` e
-    // inyecta la CSP estricta. Pasamos `inlineConfig` con el mode
-    // sidebar + feature flags resueltos: el banner del transport
-    // degraded queda gated por `claudeOrchestrator.showTransportState`
-    // (default false hasta validar la heurística en uso productivo).
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
     webview.html = buildWebviewHtml({
       webview,
       extensionUri: this.extensionUri,
-      inlineConfig: {
-        mode: 'sidebar',
-        flags: {
-          showTransportState: cfg.get<boolean>('showTransportState', false),
-        },
-      },
+      inlineConfig: { mode: 'sidebar' },
     });
 
     // === Wiring con el bridge ===

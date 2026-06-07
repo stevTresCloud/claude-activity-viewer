@@ -51,10 +51,10 @@ const MAX_LOG_RESULT_CHARS = 4000;
  */
 interface AgentState {
   name: string;
+  cwd: string;
   project: string;
   task: string;
   branch: string;
-  batchId: string;
   sessionId?: string;
   startedAtMs: number;
   lastActivityMs: number;
@@ -65,9 +65,9 @@ interface AgentState {
    * no podemos reportar una duración honesta al cerrar.
    */
   sawStart: boolean;
-  /** transcript_path del SubagentStart — puerta al detalle en F3. */
+  /** transcript_path del SubagentStart — puerta al detalle. */
   transcriptPath?: string;
-  /** agent_transcript_path del SubagentStop — puerta al detalle en F3. */
+  /** agent_transcript_path del SubagentStop — puerta al detalle. */
   agentTranscriptPath?: string;
   /** true tras SubagentStop: ignora eventos tardíos. */
   terminal: boolean;
@@ -277,10 +277,10 @@ export class HookTranslator {
     const shortId = agentId.slice(0, 8);
     return {
       name: opts?.name ?? `agent-${shortId}`,
+      cwd: cwd ?? '',
       project: context.project,
       task: context.task,
       branch: context.branch,
-      batchId: sessionId ?? `b-${shortId}`,
       sessionId,
       startedAtMs: nowMs,
       lastActivityMs: nowMs,
@@ -352,10 +352,10 @@ export class HookTranslator {
       id: agentId,
       name: state.name,
       status: 'running',
+      cwd: state.cwd,
       project: state.project,
       task: state.task,
       branch: state.branch,
-      batchId: state.batchId,
       sessionId: state.sessionId,
       startedAtIso: new Date(state.startedAtMs).toISOString(),
       lastActivityIso: new Date(state.lastActivityMs).toISOString(),

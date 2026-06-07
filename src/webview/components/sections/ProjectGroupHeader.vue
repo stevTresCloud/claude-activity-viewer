@@ -5,7 +5,7 @@
  *
  * Layout (HANDOFF §2.7):
  *   📁 {project-name}                 ← línea 1 (UI font, 12px)
- *      tarea_NNNNN · feature/SL-XXX   ← línea 2 (mono muted, 10.5px)
+ *      {sessionId-8} · feature/SL-XXX ← línea 2 (mono muted, 10.5px)
  *
  * El padding-left de la línea 2 alinea el texto bajo el nombre,
  * ignorando el folder icon — patrón hereditario de los selectors
@@ -14,11 +14,17 @@
  * Referencia: HANDOFF.md §2.7.
  */
 
-defineProps<{
+import { computed } from 'vue';
+import { formatShortSession } from '../../utils/format';
+
+const props = defineProps<{
   project: string;
-  task: string;
+  /** sessionId completo (UUID) o 'unknown' si el agente no lo tiene. */
+  sessionId: string;
   branch: string;
 }>();
+
+const shortSessionId = computed(() => formatShortSession(props.sessionId));
 </script>
 
 <template>
@@ -28,8 +34,8 @@ defineProps<{
       <i class="codicon codicon-folder" />
       <span class="project">{{ project }}</span>
     </div>
-    <!-- === Línea 2: task · branch (mono muted) === -->
-    <div class="line-2">{{ task }} · {{ branch }}</div>
+    <!-- === Línea 2: sessionId · branch (mono muted) === -->
+    <div class="line-2">{{ shortSessionId }} · {{ branch }}</div>
   </div>
 </template>
 

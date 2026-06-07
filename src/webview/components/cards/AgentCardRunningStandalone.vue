@@ -11,17 +11,16 @@
  *   - El border-left 3px running ahora vive en el container padre,
  *     no en cada line.
  *   - El sweeping progress bar va `position: absolute` full-width
- *     abajo del card (no inline en el row de actions). Cubre todo
- *     el ancho del card, dándole un sentido visual más fuerte de
- *     "este card está procesando".
- *   - Padding 12px para que las 4 líneas respiren más sin el
+ *     abajo del card. Cubre todo el ancho del card, dándole un
+ *     sentido visual más fuerte de "este card está procesando".
+ *   - Padding 12px para que las líneas respiren más sin el
  *     padding del container.
  *
- * Las 4 líneas internas son idénticas al hermano y reusan los
+ * Las 3 líneas internas son idénticas al hermano y reusan los
  * mismos átomos (StatusDot pulse, ModelBadge, ContextBar) — solo
  * el wrapper cambia. La decisión de NO parametrizar con un prop
  * `standalone` boolean en AgentCardRunning fue para evitar un
- * componente con 4 estilos en cascada según un boolean — lee mejor
+ * componente con estilos en cascada según un boolean — lee mejor
  * tener dos archivos pequeños con scope claro.
  *
  * Referencia: HANDOFF.md §2.8.2.
@@ -36,7 +35,6 @@ import { useAgentsStore } from '../../stores/useAgentsStore';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
-import AgentActionRow from './AgentActionRow.vue';
 
 const props = defineProps<{
   agent: Agent;
@@ -46,9 +44,6 @@ const props = defineProps<{
 const store = useAgentsStore();
 const isStale = computed(() => store.staleAgentIds.has(props.agent.id));
 
-// Click en el body abre el detail panel (mismo flujo que la
-// variante in-group; los botones de AgentActionRow llevan
-// @click.stop así que no disparan este handler).
 const detail = useShowDetail();
 function onBodyClick(): void {
   detail.show(props.agent.id);
@@ -98,11 +93,6 @@ const elapsedText = computed(() => {
     <!-- === L3: context bar === -->
     <div v-if="agent.contextUsedPct !== undefined" class="line indented">
       <ContextBar :pct="agent.contextUsedPct" :context-tokens="agent.contextTokens" />
-    </div>
-
-    <!-- === L4: actions sin sweep inline (sweep va absolute abajo) === -->
-    <div class="line indented actions">
-      <AgentActionRow :agent="agent" />
     </div>
 
     <!-- === Sweep bar full-width pegado al borde inferior del card === -->
@@ -188,13 +178,6 @@ const elapsedText = computed(() => {
 }
 .sub .tool {
   color: var(--foreground);
-}
-
-/* === L4 — actions container (AgentActionRow trae los 3 botones) === */
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 /* === Sweep bar full-width pegado abajo del card (HANDOFF §2.8.2) === */

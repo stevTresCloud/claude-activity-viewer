@@ -31,6 +31,9 @@ import { useAgentsStore } from '../stores/useAgentsStore';
 import { useScannerStore } from '../stores/useScannerStore';
 import type { DashboardEventToWebview } from '../../shared/dashboard-protocol';
 
+// Nota: el guard `default: never` (exhaustive check) fuerza un error de
+// compilación si el protocolo agrega un tipo nuevo sin actualizar este switch.
+
 export function useDashboardBridge(): void {
   const agents = useAgentsStore();
   const scanner = useScannerStore();
@@ -80,14 +83,7 @@ export function useDashboardBridge(): void {
       case 'sessions_from_disk':
         scanner.applySessionsFromDisk(data.sessions, data.scannedAtIso);
         break;
-      case 'transport_state_changed':
-        agents.setTransportState(data.state);
-        break;
       default: {
-        // Forward-compat: si el bridge agrega un evento nuevo no
-        // declarado en el contrato compartido, lo ignoramos en
-        // vez de tirar — así un downgrade del webview no rompe
-        // el render.
         const _exhaustive: never = data;
         void _exhaustive;
         break;

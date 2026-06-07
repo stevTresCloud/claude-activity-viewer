@@ -318,8 +318,7 @@ export class ScannerController {
 
   /**
    * Despacha mensajes del webview. Solo nos interesan los del
-   * scanner; los otros (request_cancel/open/send_message) están
-   * sin cablear todavía — el extension.ts puede ampliar el switch.
+   * scanner; request_hydrate_logs lo intercepta detail-panel.ts.
    */
   handleMessage(msg: DashboardEventToExtension): void {
     switch (msg.type) {
@@ -329,126 +328,8 @@ export class ScannerController {
       case 'request_resume_session':
         void this.resumeSession(msg.sessionId, msg.cwd, msg.firstPrompt);
         break;
-      case 'request_cancel':
-        void this.cancelAgent(msg.agentId);
-        break;
-      case 'request_open':
-        void this.openLiveAgent(msg.agentId);
-        break;
-      // NO manejamos `request_hydrate_logs` acá: el detail panel
-      // (views/detail-panel.ts) lo intercepta antes de llegar al
-      // scanner-controller y llama `bridge.hydrateLogs(id, panel.webview)`
-      // con su propio webview como target — eso evita serializar
-      // el ringbuffer (hasta 1000 entries) al sidebar que no lo usa.
-      // Si en el futuro un componente del sidebar necesita hidratar,
-      // que cablee su propio target explícito; un pass-through acá
-      // broadcast-earía a todos los webviews innecesariamente.
       default:
-        // Otros tipos (send_message): ignorados acá.
         break;
-    }
-  }
-
-  /**
-   * Abre la sesión de un agente VIVO en el chat del plugin
-   * claude-code (o terminal según setting `resumeIn`). Reusa la
-   * lógica de `resumeSession` — el sessionId del agente vivo es el
-   * mismo sessionId que viaja en el `.jsonl`, así que el flujo de
-   * "open" y "resume past session" son equivalentes técnicamente
-   * (`claude --resume <sessionId>` abre la conversación en curso
-   * cuando el agente sigue corriendo).
-   *
-   * Tres casos a manejar:
-   *   1. agentId desconocido → log + no-op.
-   *   2. agente sin `sessionId` aún (el SDK tarda 1-2 frames en
-   *      proveerlo) → toast informativo y salida limpia.
-   *   3. agente con sessionId → delega a `resumeSession`.
-   */
-  private async openLiveAgent(agentId: string): Promise<void> {
-    if (!agentId) {
-      this.channel.appendLine(`[scanner] reject open: empty agentId`);
-      return;
-    }
-    const meta = this.bridge.getResumeTarget(agentId);
-    if (!meta) {
-      this.channel.appendLine(
-        `[scanner] reject open: agent ${agentId.slice(0, 8)} not found`,
-      );
-      return;
-    }
-    if (!meta.sessionId) {
-      // El SDK no ha emitido el primer envelope todavía. La UI
-      // debería tener el botón disabled mientras agent.sessionId
-      // sea undefined; este branch es defensa por si el user
-      // alcanza a clickear en la ventana de 1-2s entre spawn y
-      // primer mensaje.
-      this.channel.appendLine(
-        `[scanner] reject open: agent ${agentId.slice(0, 8)} has no sessionId yet`,
-      );
-      void vscode.window.showInformationMessage(
-        `Agent "${meta.name}" hasn't started its session yet. Try again in a moment.`,
-      );
-      return;
-    }
-    await this.resumeSession(meta.sessionId, meta.cwd, meta.name);
-  }
-
-  /**
-   * Cancela un agente vivo desde la UI. El bridge ya tiene la
-   * maquinaria (`bridge.cancel(agentId)` aborta el AbortController);
-   * acá agregamos la capa de confirmación opcional y los logs.
-   *
-   * Si el setting `claudeOrchestrator.cancelConfirm` es `true`,
-   * mostramos un warning modal-light (no bloqueante) antes de matar
-   * el agente — patrón paralelo a `resumeConfirm`. Default off
-   * porque cancel es lo más liviano y el user puede re-spawnar
-   * trivial; el setting está para usuarios que tengan agentes caros
-   * (long-running con cost alto) y prefieran el doble-tap.
-   *
-   * `bridge.cancel` retorna `false` si no hay agente con ese id
-   * (ya terminó / nunca existió) — eso es no-op silencioso desde la
-   * UI, lo loggeamos al channel para diagnóstico pero no
-   * mostramos toast.
-   */
-  private async cancelAgent(agentId: string): Promise<void> {
-    // Guard de string vacía: el discriminated union ya garantiza
-    // `agentId: string` en compile-time, pero un bug del frontend
-    // podría mandar "". Sin esto el bridge buscaría `aborts.get('')`
-    // y retornaría false silencioso; cortamos acá con log.
-    if (!agentId) {
-      this.channel.appendLine(`[scanner] reject cancel: empty agentId`);
-      return;
-    }
-
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
-    const confirm = cfg.get<boolean>('cancelConfirm', false);
-
-    if (confirm) {
-      const choice = await vscode.window.showWarningMessage(
-        `Cancel running agent?\n\nThis will abort the underlying Claude subprocess.`,
-        { modal: false },
-        'Cancel agent',
-        'Keep running',
-      );
-      if (choice !== 'Cancel agent') return;
-    }
-
-    const cancelled = this.bridge.cancel(agentId);
-    this.channel.appendLine(
-      `[scanner] cancel agent=${agentId.slice(0, 8)} delivered=${cancelled}`,
-    );
-
-    // Si el user pasó por el modal (confirm) pero el agente había
-    // terminado entre el click y la confirmación, le devolvemos un
-    // info toast para que no quede confundido ("¿llegó el cancel o
-    // terminó solo?"). Sin esto el log de delivered=false es
-    // silencioso desde la UI.
-    if (confirm && !cancelled) {
-      const meta = this.bridge.getResumeTarget(agentId);
-      const label = meta?.name ?? agentId.slice(0, 8);
-      void vscode.window.showInformationMessage(
-        `Agent "${label}" had already finished — nothing to cancel.`,
-      );
     }
   }
 

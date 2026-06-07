@@ -9,7 +9,7 @@
  *       L1: dot pulse + name + ModelBadge + elapsed
  *       L2: subtitle · current_tool
  *       L3: ContextBar
- *       L4: AgentActionRow (pause/cancel/open) + sweeping bar
+ *       L4: sweeping progress bar
  *
  * El `margin-left: -2px` alinea el stripe con el borde izquierdo del
  * container del project group (que tiene padding 10px). Sin el
@@ -31,7 +31,6 @@ import { useAgentsStore } from '../../stores/useAgentsStore';
 import StatusDot from '../atoms/StatusDot.vue';
 import ContextBar from '../atoms/ContextBar.vue';
 import ModelBadge from '../atoms/ModelBadge.vue';
-import AgentActionRow from './AgentActionRow.vue';
 
 const props = defineProps<{
   agent: Agent;
@@ -43,8 +42,6 @@ const props = defineProps<{
 const store = useAgentsStore();
 const isStale = computed(() => store.staleAgentIds.has(props.agent.id));
 
-// Click en el body de la card (no en botones de AgentActionRow,
-// que llevan @click.stop) abre el detail panel en un editor tab.
 const detail = useShowDetail();
 function onBodyClick(): void {
   detail.show(props.agent.id);
@@ -100,11 +97,8 @@ const elapsedText = computed(() => {
       <ContextBar :pct="agent.contextUsedPct" :context-tokens="agent.contextTokens" />
     </div>
 
-    <!-- === L4: actions + sweeping progress bar inline ===
-         El sweep ocupa el espacio sobrante a la derecha de los 3
-         botones (flex:1). -->
-    <div class="line indented actions">
-      <AgentActionRow :agent="agent" />
+    <!-- === L4: sweeping progress bar === -->
+    <div class="line indented">
       <div class="progress-track">
         <div class="progress-bar sweep-bar" :class="{ paused: isStale }" />
       </div>
@@ -126,8 +120,6 @@ const elapsedText = computed(() => {
   /* Alinea el stripe con el borde interno del container del project
    * group, que tiene padding-left 10px. */
   margin-left: -2px;
-  /* Click-through al detail panel. Cursor pointer en toda la card
-   * excepto los botones de AgentActionRow (que llevan @click.stop). */
   cursor: pointer;
 }
 .card:hover {
@@ -189,18 +181,7 @@ const elapsedText = computed(() => {
   color: var(--foreground);
 }
 
-/* === L4 — actions container ===
- * AgentActionRow ya trae los 3 botones; acá solo el contenedor flex
- * con gap y el track del sweep bar que llena el espacio sobrante. */
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* Sweeping bar: track 2px que toma el espacio sobrante (flex:1) a
- * la derecha de los 3 botones. El bar interno tiene width 25% del
- * track y se desplaza con keyframes `sweep` (style.css). */
+/* === L4 — sweep bar === */
 .progress-track {
   flex: 1;
   margin-left: 6px;

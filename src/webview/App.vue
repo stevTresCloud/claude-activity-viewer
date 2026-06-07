@@ -26,7 +26,6 @@
 import { useProjectFilter } from './composables/useProjectFilter';
 import { useDashboardBridge } from './composables/useDashboardBridge';
 import { useDetailMode } from './composables/useDetailMode';
-import { useAgentsStore } from './stores/useAgentsStore';
 import Toolbar from './components/Toolbar.vue';
 import AllProjectsView from './views/AllProjectsView.vue';
 import SingleProjectView from './views/SingleProjectView.vue';
@@ -34,7 +33,6 @@ import AgentDetailView from './views/AgentDetailView.vue';
 
 const detail = useDetailMode();
 const { selectedProjectId } = useProjectFilter();
-const store = useAgentsStore();
 
 // Wire del adapter postMessage → store. Hace addEventListener al
 // mount, cleanup al unmount. Aplica en ambos modos (sidebar y

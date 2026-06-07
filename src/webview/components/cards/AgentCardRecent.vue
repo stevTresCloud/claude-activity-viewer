@@ -22,7 +22,6 @@ import { computed } from 'vue';
 import type { Agent, AgentStatus } from '../../types';
 import { formatCostUsd, formatElapsed, formatTokens } from '../../utils/format';
 import { useShowDetail } from '../../composables/useShowDetail';
-import VerificationBadge from '../atoms/VerificationBadge.vue';
 
 const props = defineProps<{
   agent: Agent;
@@ -49,16 +48,8 @@ const STATUS_PRESENTATION = {
     color: 'var(--stripe-cancelled)',
     iconClass: 'codicon-circle-slash',
   },
-  // needs_review usa el color naranja warning como stripe + el icon
-  // de eye (reviewer es humano) para distinguirlo visualmente de
-  // done/failed/cancelled. El detalle de por qué (D vs A) vive en
-  // el detail panel + el VerificationBadge en la misma card.
-  needs_review: {
-    color: 'var(--color-warning, #ff9800)',
-    iconClass: 'codicon-eye',
-  },
 } as const satisfies Record<
-  'done' | 'failed' | 'cancelled' | 'needs_review',
+  'done' | 'failed' | 'cancelled',
   { color: string; iconClass: string }
 >;
 
@@ -67,12 +58,7 @@ const STATUS_PRESENTATION = {
  * un status raro (no debería en RECENT), cae a `cancelled`.
  */
 function presentationFor(status: AgentStatus) {
-  if (
-    status === 'done' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'needs_review'
-  ) {
+  if (status === 'done' || status === 'failed' || status === 'cancelled') {
     return STATUS_PRESENTATION[status];
   }
   return STATUS_PRESENTATION.cancelled;
@@ -89,10 +75,7 @@ const presentation = computed(() => presentationFor(props.agent.status));
 
 const meta = computed(() => {
   const duration = formatElapsed(props.agent.durationMs);
-  // done + needs_review comparten formato extendido: ambos ejecutaron
-  // trabajo billable. failed/cancelled solo muestran duration porque
-  // sus métricas parciales no representan trabajo completo.
-  if (props.agent.status === 'done' || props.agent.status === 'needs_review') {
+  if (props.agent.status === 'done') {
     const tokens = formatTokens(props.agent.tokensUsed);
     const cost = formatCostUsd(props.agent.costUsd);
     return `${duration} · ${tokens} · ${cost}`;
@@ -121,11 +104,6 @@ const isFailed = computed(() => props.agent.status === 'failed');
       :style="{ color: presentation.color }"
     />
     <span class="name">{{ agent.name }}</span>
-    <VerificationBadge
-      :mode="agent.verificationMode"
-      :reviewed="agent.verificationReviewed"
-      :promoted="agent.verificationPromoted"
-    />
     <span class="meta">{{ meta }}</span>
   </div>
 </template>

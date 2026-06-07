@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * ProjectGroup — wrapper card para los agentes de un mismo
- * project + task + branch + batchId.
+ * project + sessionId + cwd.
  *
  * Estructura:
  *   <ProjectGroup>

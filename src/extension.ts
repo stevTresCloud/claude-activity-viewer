@@ -118,15 +118,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // show_detail y delega el resto al scanner.
   const handleWebviewMessage = (msg: DashboardEventToExtension): void => {
     if (msg.type === 'request_show_detail') {
-      const meta = bridge.getResumeTarget(msg.agentId);
-      const name = meta?.name ?? msg.agentId.slice(0, 8);
+      const name = bridge.getAgentName(msg.agentId) ?? msg.agentId.slice(0, 8);
       detailPanel.showForAgent(msg.agentId, name);
       return;
     }
-    // request_run_test_agent / request_inject_claude_md: comandos del
-    // orquestador, retirados en el re-enfoque a viewer. Caen al
-    // `default` no-op del scanner. La limpieza de esos botones del
-    // front es trabajo de F3.
     scanner.handleMessage(msg);
   };
 

@@ -68,7 +68,6 @@ function makeSnapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
     project: 'myproj',
     task: '',
     branch: 'main',
-    batchId: 'session-abc',
     startedAtIso: '2026-06-05T10:00:00.000Z',
     elapsedMs: 0,
     tokensUsed: 0,
@@ -119,15 +118,14 @@ function makeBridge(ctx = makeContext()) {
 // =====================================================================
 
 describe('isTerminalStatus (SSoT for terminal status detection)', () => {
-  it('cubre los 4 estados terminales del enum', () => {
-    expect(TERMINAL_STATUSES).toEqual(['done', 'failed', 'cancelled', 'needs_review']);
+  it('cubre los 3 estados terminales del enum', () => {
+    expect(TERMINAL_STATUSES).toEqual(['done', 'failed', 'cancelled']);
   });
 
-  it('done / failed / cancelled / needs_review → true', () => {
+  it('done / failed / cancelled → true', () => {
     expect(isTerminalStatus('done')).toBe(true);
     expect(isTerminalStatus('failed')).toBe(true);
     expect(isTerminalStatus('cancelled')).toBe(true);
-    expect(isTerminalStatus('needs_review')).toBe(true);
   });
 
   it('running / pending → false', () => {
@@ -435,22 +433,11 @@ describe('DashboardBridge — webview y listeners', () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('getResumeTarget retorna sessionId + name; null si no existe', () => {
+  it('getAgentName retorna el name del snapshot; null si no existe', () => {
     const { bridge } = makeBridge();
-    bridge.ingest(created(makeSnapshot({ id: 'a', sessionId: 'sess-9', name: 'mig' })));
-    expect(bridge.getResumeTarget('a')).toEqual({
-      sessionId: 'sess-9',
-      cwd: '',
-      name: 'mig',
-    });
-    expect(bridge.getResumeTarget('nope')).toBe(null);
-  });
-
-  it('cancel es no-op en el viewer (devuelve false)', () => {
-    const { bridge } = makeBridge();
-    bridge.ingest(created(makeSnapshot({ id: 'a' })));
-    expect(bridge.cancel('a')).toBe(false);
-    expect(bridge.cancel('nope')).toBe(false);
+    bridge.ingest(created(makeSnapshot({ id: 'a', name: 'mig' })));
+    expect(bridge.getAgentName('a')).toBe('mig');
+    expect(bridge.getAgentName('nope')).toBe(null);
   });
 
   it('hydrateLogs emite agent_log_history al target con todos los entries', () => {
@@ -495,8 +482,6 @@ describe('DashboardBridge — hydrate y persistencia', () => {
     ctx.globalState.update(STATE_KEY, [
       {
         snapshot: makeSnapshot({ id: 'orphan', status: 'running' }),
-        cwd: '/x',
-        prompt: 'p',
         log: [],
       },
     ]);
@@ -517,8 +502,6 @@ describe('DashboardBridge — hydrate y persistencia', () => {
     ctx.globalState.update(STATE_KEY, [
       {
         snapshot: makeSnapshot({ id: 'stale', status: 'done', completedAtIso: old }),
-        cwd: '',
-        prompt: '',
         log: [],
       },
     ]);
@@ -535,8 +518,6 @@ describe('DashboardBridge — hydrate y persistencia', () => {
     ctx.globalState.update(STATE_KEY, [
       {
         snapshot: makeSnapshot({ id: 'weird', status: 'done', completedAtIso: 'not-a-date' }),
-        cwd: '',
-        prompt: '',
         log: [],
       },
     ]);
@@ -576,7 +557,7 @@ describe('DashboardBridge — resurrección de huérfanos', () => {
   async function withOrphan(id = 'orphan') {
     const ctx = makeContext();
     ctx.globalState.update(STATE_KEY, [
-      { snapshot: makeSnapshot({ id, status: 'running' }), cwd: '/x', prompt: 'p', log: [] },
+      { snapshot: makeSnapshot({ id, status: 'running' }), log: [] },
     ]);
     const { bridge } = makeBridge(ctx);
     await bridge.hydrate();

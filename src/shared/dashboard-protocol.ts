@@ -16,9 +16,6 @@
  *   - Los dos lados se actualizan en el mismo PR; el contrato es la
  *     fuente de verdad y rompe la compilación si una punta se
  *     desincroniza.
- *
- * Referencia autoritativa: ARCHITECTURE_PHASE_I.md §4 (los 5
- * eventos extension→webview + 3 webview→extension).
  * ================================================================ */
 
 // === Constantes compartidas ===
@@ -44,41 +41,27 @@ export const LOG_RING_MAX = 1000;
  * 'pending' está declarado por consistencia con el shape esperado
  * por las vistas (UP NEXT existe en el diseño) pero el bridge no
  * lo emite todavía — no hay queue management.
- *
- * 'needs_review' es una PROMOCIÓN sobre `done`/`failed` que el bridge
- * aplica al cierre de `wait_for_agents` cuando los mecanismos D + A
- * (verification) detectan algo que el operador debe revisar:
- *   - D: el agente declaró `decisions_made_without_consultation` o
- *     `uncertainties` no vacíos en su exit report.
- *   - A: el critic Haiku emitió 1+ flags al revisar el diff.
- * El agente puede haber terminado limpio desde su perspectiva pero
- * el orchestrator lo marca para evitar merges silenciosos sospechosos.
  */
 export type AgentStatus =
   | 'running'
   | 'pending'
   | 'done'
   | 'failed'
-  | 'cancelled'
-  | 'needs_review';
+  | 'cancelled';
 
 /**
  * Estados terminales: los que indican "el agente terminó su lifecycle, no
  * volverá a estar corriendo". Lo respetan varios sitios cross-archivo
- * (bridge `emitStatusChange` invariante, bridge `runWait` pending detection,
- * store `recent` filter, AgentCardRecent STATUS_PRESENTATION).
+ * (bridge `emitStatusChange` invariante, store `recent` filter,
+ * AgentCardRecent STATUS_PRESENTATION).
  *
  * Mantener este enum + `isTerminalStatus` como SSoT evita drift cuando se
- * agrega un nuevo terminal status (ej. la adición de `'needs_review'` en
- * Mecanismo D+A obligó a actualizar 4 sitios — sin la constante, uno se
- * olvidó y permitía un evento late del SDK degradar `needs_review` a
- * `running`).
+ * agrega un nuevo terminal status.
  */
 export const TERMINAL_STATUSES = [
   'done',
   'failed',
   'cancelled',
-  'needs_review',
 ] as const satisfies readonly AgentStatus[];
 
 export type TerminalAgentStatus = (typeof TERMINAL_STATUSES)[number];
@@ -97,28 +80,6 @@ export type ProjectLifecycle = 'active' | 'idle' | 'inactive';
 
 /** Prioridad de un agente pending. Reservado para queue futuro. */
 export type Priority = 'LOW' | 'MED' | 'HIGH';
-
-/**
- * Modo de verificación del agente (Mecanismo D + A). Capturado al
- * spawn y persistido en el snapshot; la UI lo usa para decidir si
- * renderizar el VerificationBadge en la card RECENT. Conjunto cerrado:
- * coincide con el enum del setting `claudeOrchestrator.verification`.
- */
-export type VerificationMode = 'none' | 'structured' | 'critic' | 'both' | 'human-review';
-
-/**
- * Estado heurístico del transport MCP. El bridge lo deriva del tiempo
- * que llevan los `wait_for_agents` activos: si alguno está vivo > 60s
- * sin haber resuelto, asumimos que el transport HTTP **puede** haber
- * tirado (síntoma exacto del field report v0.1.0 — los agentes siguen
- * corriendo pero el long-poll del chat caller nunca recibe respuesta).
- * Se reinicia a `'healthy'` cuando los waiters resuelven.
- *
- * El banner del dashboard que renderiza esto es opt-in via setting
- * `claudeOrchestrator.showTransportState` (default false) hasta que la
- * heurística esté validada en uso productivo.
- */
-export type TransportState = 'healthy' | 'degraded';
 
 // === Entidades del wire ===
 
@@ -144,8 +105,8 @@ export interface AgentSnapshot {
   status: AgentStatus;
 
   /**
-   * sessionId del SDK (capturado en `agent_runner` cuando el SDK lo
-   * emite). Opcional porque el SDK puede tardar 1-2 frames en
+   * sessionId del SDK (capturado en el hook SubagentStart).
+   * Opcional porque el SDK puede tardar 1-2 frames en
    * proveerlo y el bridge ya empieza a emitir snapshots antes.
    *
    * Sirve para dedup contra sesiones históricas en disco: una
@@ -163,11 +124,18 @@ export interface AgentSnapshot {
    */
   transcriptPath?: string;
 
-  // Agrupación visual (cards del dashboard)
+  /**
+   * Working directory del agente (del hook SubagentStart). Lo consume
+   * `groupAgents` como parte de la clave de agrupación. Vacío en
+   * snapshots persistidos antes de que se threadeara.
+   */
+  cwd?: string;
+
+  // Agrupación visual (cards del dashboard): groupAgents usa
+  // project|sessionId|cwd.
   project: string;
   task: string;
   branch: string;
-  batchId: string;
 
   // Solo running
   subtitle?: string;
@@ -222,34 +190,6 @@ export interface AgentSnapshot {
   durationMs?: number;
   /** Razón del estado terminal (merge conflict, ide_restart, etc.). */
   reason?: string;
-
-  // === Verification (Mecanismo D + A) — campos UI-visibles ===
-  //
-  // El bloque completo del wire vive en WaitForAgentsAgentResult.verification.
-  // Acá replicamos UN subset (3 booleanos + mode) que la card del sidebar
-  // necesita para renderear el VerificationBadge sin tener que cruzar el
-  // wire de wait_for_agents — el sidebar mantiene su state desde
-  // agent_status_changed.
-
-  /**
-   * Modo de verification capturado al spawn. Lockeado para todo el
-   * lifecycle del agente. La UI lo usa para decidir si mostrar el
-   * VerificationBadge en RECENT (modo === 'none' → sin badge).
-   */
-  verificationMode?: VerificationMode;
-  /**
-   * `true` cuando el bridge ya corrió el paso de verification del agente
-   * (parse del exit + critic spawn si aplica). Mientras es undefined o
-   * false, el badge muestra estado "pending" o no se renderiza.
-   */
-  verificationReviewed?: boolean;
-  /**
-   * `true` cuando el bridge promovió a `needs_review` (por D o por A).
-   * Distinto del `status === 'needs_review'`: ese es el wire-status; este
-   * flag distingue "promovido vs naturalmente done" para el color del
-   * badge (verde si reviewed y NO promoted; naranja si promoted).
-   */
-  verificationPromoted?: boolean;
 }
 
 /**
@@ -320,137 +260,10 @@ export type AgentMetrics = Pick<
   'model' | 'contextTokens' | 'contextUsedPct' | 'tokensUsed'
 >;
 
-// === wait_for_agents (MCP tool) ===
-
-/**
- * Hallazgo del critic Haiku tras revisar el diff `headBefore..HEAD`.
- * Wire-out del `parseCriticOutput` del runtime. Severidades:
- *   - `high`: probable defecto (assertion flip, SQL inválido, etc.).
- *   - `med`: sospechoso, merece review humana.
- *   - `low`: estilo, menor, o falla interna del critic (parse error).
- * `file` y `line` son opcionales porque el critic puede flaggear
- * patrones cross-file ("nuevas dependencias externas sin justificar")
- * que no se anclan a una línea específica.
- */
-export interface CriticFinding {
-  file?: string;
-  line?: number;
-  severity: 'high' | 'med' | 'low';
-  summary: string;
-}
-
-/**
- * Reporte estructurado que el agente devuelve en su último text block
- * cuando `verification ≠ 'none'`. Forma autoritativa en
- * `runtime/exit-schema.ts` (Zod schema EXIT_SCHEMA_V1).
- *
- * Nota: cuando `parseExitSchema` falla, este campo queda undefined en
- * `WaitForAgentsAgentResult` — el chat caller lo distingue de "agente
- * que cumplió pero declaró vacío" mirando si la key existe.
- */
-export interface ExitReport {
-  status: 'ok' | 'needs_review' | 'failed';
-  files_changed: string[];
-  evidence_run: string[];
-  decisions_made_without_consultation: string[];
-  uncertainties: string[];
-}
-
-/**
- * Bloque de verification del wire. Lo incluimos en
- * `WaitForAgentsAgentResult` cuando el bridge corrió Mecanismo D y/o A.
- * Los 3 sub-campos son independientes:
- *   - `mode`: qué setting estaba activo al cierre.
- *   - `exit_report`: lo que el agente declaró (si parseó).
- *   - `critic_findings`: lo que el critic Haiku flaggeó (si corrió).
- *   - `auto_promoted_reason`: por qué el bridge promovió a needs_review.
- *     Strings estables para métricas: 'decisions' | 'uncertainties' |
- *     'critic_flags'. Vacío cuando el status NO fue auto-promovido.
- */
-export interface VerificationReport {
-  mode: 'none' | 'structured' | 'critic' | 'both' | 'human-review';
-  exit_report?: ExitReport;
-  exit_parse_reason?: string;
-  critic_findings?: CriticFinding[];
-  critic_cost_usd?: number;
-  critic_duration_ms?: number;
-  auto_promoted_reason?: string;
-}
-
-/**
- * Resultado por agente terminado dentro del wait. Wire compacto del
- * StoredAgent en estado terminal: lo lee el chat externo para usar
- * el output del agente como contexto.
- */
-export interface WaitForAgentsAgentResult {
-  agent_id: string;
-  status: Exclude<AgentStatus, 'running' | 'pending'>;
-  /**
-   * Último text block que el agente emitió mid-stream. Para `done`
-   * es el mensaje de cierre. Para `cancelled`/`failed` puede ser el
-   * último progreso ANTES del corte (NO el string del runner tipo
-   * "User cancelled" — preferimos lo que el agente alcanzó a decir).
-   */
-  last_message: string | null;
-  duration_ms: number;
-  tokens_used: number;
-  /**
-   * Costo billable acumulado del agente en USD (`total_cost_usd` del
-   * SDK). El chat caller lo usa para reportar costo al user en el
-   * resumen consolidado, o agregar costos por batch.
-   */
-  cost_usd: number;
-  model?: string;
-  /**
-   * Razón terminal cuando aplica: `user_cancelled`, `ide_restart`,
-   * `max_runtime_exceeded`, `not_found` (cuando el agentId no
-   * existe en el registry).
-   */
-  reason?: string;
-  /**
-   * Bloque verification del Mecanismo D + A. Presente cuando el
-   * setting `claudeOrchestrator.verification` ≠ 'none' al momento
-   * de `wait_for_agents`. Opcional para backwards-compat con consumers
-   * que no lo lean.
-   */
-  verification?: VerificationReport;
-}
-
-/**
- * Resultado por agente que SIGUE running cuando el wait_for_agents
- * timed out. Incluye `last_message_partial` (lo que dijo el agente
- * hasta ahora) + `suspected_stuck` (flag heurístico de inactividad).
- */
-export interface WaitForAgentsAgentPending {
-  agent_id: string;
-  /** "running" para los pending; otros estados no aparecen acá. */
-  status: 'running';
-  last_message_partial: string | null;
-  /** ISO timestamp del último evento que el bridge procesó. */
-  last_activity_at: string;
-  /**
-   * `true` si `now - last_activity_at > stuckDetectionSec` (setting
-   * `claudeOrchestrator.stuckDetectionSec`, default 60s). El bridge
-   * NO cancela el agente — solo señala. El chat externo decide.
-   */
-  suspected_stuck: boolean;
-}
-
-/**
- * Respuesta completa del MCP tool `wait_for_agents`. Compatible con
- * el patrón retry: si `timed_out: true` y `pending: [...]`, el chat
- * externo re-llama con los pending agent_ids.
- */
-export interface WaitForAgentsResult {
-  results: WaitForAgentsAgentResult[];
-  pending: WaitForAgentsAgentPending[];
-  timed_out: boolean;
-}
-
 // === Eventos Extension → Webview ===
 
 /**
- * Discriminated union de los 5 eventos que el bridge emite al
+ * Discriminated union de los eventos que el bridge emite al
  * webview vía `webview.postMessage(...)`.
  *
  * Por qué discriminated union y no múltiples interfaces:
@@ -461,7 +274,7 @@ export interface WaitForAgentsResult {
 export type DashboardEventToWebview =
   /** Snapshot inicial al montar el webview. Reemplaza todo el state. */
   | { type: 'agent_list'; agents: AgentSnapshot[] }
-  /** Agente nuevo (vino de spawn_agents MCP o de testAgent command). */
+  /** Agente nuevo observado por el ingester. */
   | { type: 'agent_created'; agent: AgentSnapshot }
   /**
    * Actualización parcial de un agente. `status` siempre va (puede
@@ -475,7 +288,7 @@ export type DashboardEventToWebview =
       status: AgentStatus;
       metadata?: Partial<AgentSnapshot>;
     }
-  /** Entrada nueva en el log streaming. La consumirá el detail panel futuro. */
+  /** Entrada nueva en el log streaming. La consumirá el detail panel. */
   | { type: 'agent_log'; agentId: string; entry: LogEntry }
   /** Final del lifecycle del agente. Equivale a status terminal + meta. */
   | {
@@ -510,32 +323,21 @@ export type DashboardEventToWebview =
    * las mergea al snapshot; ContextBar/ModelBadge se encienden con
    * ellas y se esconden si no llegan (parseo fallido / sin transcript).
    */
-  | { type: 'agent_metrics'; agentId: string; metrics: AgentMetrics }
-  /**
-   * Transición del estado heurístico del transport. Se emite SOLO
-   * cuando cambia (no en cada update); la UI guarda el último valor
-   * recibido. El sidebar puede usarlo para mostrar un banner con
-   * "transport may have dropped — re-call wait_for_agents to recover".
-   */
-  | { type: 'transport_state_changed'; state: TransportState };
+  | { type: 'agent_metrics'; agentId: string; metrics: AgentMetrics };
 
-// === Eventos Webview → Extension (declarados, sin handler todavía) ===
+// === Eventos Webview → Extension ===
 
 /**
- * Shape de los eventos que el webview enviará al extension host
+ * Shape de los eventos que el webview envía al extension host
  * vía `vscode.postMessage(...)`.
  *
- * Hoy cableados:
- *   - request_resume_session: el botón Resume de una SessionCard.
- *   - request_rescan: el botón "Rescan" del Toolbar.
- *
- * Reservados (decorativos en la UI, sin handler):
- *   - request_cancel, request_open, request_send_message.
+ * Cableados:
+ *   - request_resume_session: botón Resume de una SessionCard.
+ *   - request_rescan: botón "Rescan" del Toolbar.
+ *   - request_hydrate_logs: el detail panel al montar.
+ *   - request_show_detail: click en body de una card.
  */
 export type DashboardEventToExtension =
-  | { type: 'request_cancel'; agentId: string }
-  | { type: 'request_open'; agentId: string }
-  | { type: 'request_send_message'; agentId: string; message: string }
   /** Reanudar una sesión histórica abriendo `claude --resume <id>` en terminal nueva. */
   | { type: 'request_resume_session'; sessionId: string; cwd: string; firstPrompt?: string }
   /** Forzar re-scan inmediato de projects+sessions (botón manual del Toolbar). */
@@ -553,22 +355,7 @@ export type DashboardEventToExtension =
    * DetailPanelManager del extension host crea el WebviewPanel y le
    * inyecta `window.__claudeOrchestrator.agentId`.
    */
-  | { type: 'request_show_detail'; agentId: string }
-  /**
-   * Dispara el comando palette `Claude Orchestrator: Test Agent` desde
-   * la UI. Lo emite el botón "Run Test Agent" del empty-hint cuando el
-   * dashboard está sin agentes. Atajo de discoverability — equivalente
-   * a Ctrl+Shift+P → "Test Agent" pero un click.
-   */
-  | { type: 'request_run_test_agent' }
-  /**
-   * Dispara el inject de CLAUDE.md desde el toolbar del dashboard.
-   * Modo auto (createIfMissing=false) — solo actualiza CLAUDE.md
-   * existentes en workspace folders + projectsRoot. Para crear nuevos,
-   * el comando palette `Inject MCP directive into workspaces` ofrece la
-   * variante con creación.
-   */
-  | { type: 'request_inject_claude_md' };
+  | { type: 'request_show_detail'; agentId: string };
 
 // === Entidades para los scanners (filesystem-derived) ===
 

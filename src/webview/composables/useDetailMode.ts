@@ -33,9 +33,6 @@ declare global {
     __claudeOrchestrator?: {
       mode?: string;
       agentId?: string | null;
-      flags?: {
-        showTransportState?: boolean;
-      };
     };
   }
 }
