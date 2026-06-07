@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-07
+
+**Pivot to a read-only activity viewer.** v0.1 and v0.2 were an *orchestrator*: an embedded MCP server that spawned, waited on, verified and cancelled Claude Code agents. That role is now better served by Claude Code natively, so the project re-focuses on the part that has lasting value — **observability**. v0.3 watches the agents Claude Code already runs, via its activity hooks, and never spawns or drives them.
+
+The orchestrator line is preserved and remains installable at tag `v0.2.0`.
+
+### Added
+
+- **Hooks-driven ingester.** A global hook forwarder (`SubagentStart` / `SubagentStop` / `Stop` / `SessionEnd`) spools NDJSON events that the extension tails and translates through a per-agent state machine into the dashboard store. Installed once via the `Install global activity hooks` command; removable via `Uninstall global activity hooks`.
+- **Liveness reconciliation.** Running agents pulse while active and are flagged idle (without leaving the board) when they stop emitting activity. Orphaned agents left "running" by an IDE restart are reconciled. Finished agents show an honest duration (`—` instead of a fake `0s` when no real start was observed).
+- **Detail panel reads the transcript.** Opening an agent's detail panel reads `model`, token usage and context% on demand from the session `.jsonl` transcript, with graceful degradation (bars hide) when the data is absent.
+- **Grouping by `project · session · directory`** with a short session id and branch in each group header.
+- **Completion toast** when an agent reaches a terminal state, with a shortcut to its detail panel.
+
+### Removed
+
+- The embedded **MCP server** and all orchestration tools (`spawn_agents`, `wait_for_agents`, `list_agents`, `get_agent_log`, `cancel_agent`), the `@anthropic-ai/claude-agent-sdk` runner, bearer auth, and the agent-cancel UI.
+- **Verification mechanisms D + A** (structured-exit parsing and the Haiku critic) — they only made sense for an orchestrator that drove the agents. The `claudeOrchestrator.verification` and `claudeOrchestrator.cancelConfirm` settings are gone.
+- The `~75 MB` bundle: with the SDK/CLI runner removed, the `.vsix` is now small (no bundled binary).
+
+### Toolchain
+
+- `vue-tsc` is pinned and wired into the build (`npm run typecheck` runs `tsc` for the extension and `vue-tsc` for the webview); the `package` step now typechecks before producing the build that feeds `vsce`.
+
 ## [0.2.0] — 2026-05-28
 
 Second v0.2 milestone — **Mecanismo D + A safety net**. Closes ticket #1 of the v0.2 backlog, driven by `research/VERIFICATION_MECHANISMS.md` (incident pattern observed during portforward v16→v19: 1 silent assertion flip + 1 SQL column from a stale schema that survived the agent's self-reported success criteria). The two mechanisms work as one unit: D forces the agent to declare decisions/uncertainties in a structured exit JSON; A spawns a Haiku critic post-fan-in that reviews the actual diff and flags what the agent omitted.

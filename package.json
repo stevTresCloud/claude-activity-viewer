@@ -1,8 +1,8 @@
 {
   "name": "claude-orchestrator",
   "displayName": "Claude Orchestrator",
-  "description": "VS Code extension to orchestrate multiple Claude Code agents in parallel via embedded MCP server + observable kanban dashboard.",
-  "version": "0.2.0",
+  "description": "VS Code extension that surfaces your Claude Code agents live in a sidebar — a read-only activity viewer driven by Claude Code hooks. See running sub-agents, their model and context usage, and recent sessions, without leaving the editor.",
+  "version": "0.3.0",
   "license": "MIT",
   "publisher": "stevTresCloud",
   "repository": {
@@ -16,14 +16,14 @@
   "keywords": [
     "claude",
     "anthropic",
-    "mcp",
+    "claude-code",
     "agents",
-    "orchestration",
+    "sub-agents",
     "dashboard",
-    "ai",
-    "automation",
-    "kanban",
-    "sub-agents"
+    "viewer",
+    "observability",
+    "hooks",
+    "ai"
   ],
   "engines": {
     "vscode": "^1.120.0",
@@ -102,11 +102,6 @@
           "default": false,
           "description": "If true, show a confirmation dialog before resuming a past Claude session."
         },
-        "claudeOrchestrator.cancelConfirm": {
-          "type": "boolean",
-          "default": false,
-          "description": "If true, show a confirmation dialog before cancelling a running agent from the dashboard."
-        },
         "claudeOrchestrator.notifyOnComplete": {
           "type": "boolean",
           "default": true,
@@ -119,26 +114,16 @@
         },
         "claudeOrchestrator.resumeIn": {
           "type": "string",
-          "enum": ["chat", "terminal"],
+          "enum": [
+            "chat",
+            "terminal"
+          ],
           "default": "chat",
           "enumDescriptions": [
             "Open the resumed session in the Claude Code sidebar chat (requires the 'anthropic.claude-code' extension). Falls back to terminal if the extension is missing.",
             "Open the resumed session in a new VS Code terminal running 'claude --resume <id>'."
           ],
           "description": "Where to open a past session when clicking Resume. 'chat' uses the Claude Code extension's URI handler; 'terminal' spawns a new VS Code terminal."
-        },
-        "claudeOrchestrator.verification": {
-          "type": "string",
-          "enum": ["none", "structured", "critic", "both", "human-review"],
-          "default": "structured",
-          "enumDescriptions": [
-            "Legacy: no extra verification. wait_for_agents returns the agent's free-text last_message as-is. Use only for atomic tasks where the structured exit adds noise.",
-            "Mechanism D only (default). The orchestrator appends an exit-report instruction to every prompt and parses the agent's final JSON block. Auto-promotes status to 'needs_review' when the agent declares decisions_made_without_consultation or uncertainties. Zero runtime cost — only changes the agent's prompt.",
-            "Mechanism A only. After wait_for_agents, the orchestrator spawns a Haiku critic per terminal agent that reviews the diff <headBefore>..HEAD with read-only tools and flags concerns. Any flag promotes status to 'needs_review'. Adds ~$0.002/agent and ~30-60s per batch.",
-            "Mechanisms D + A combined (recommended for production migrations and cross-file refactors). The structured exit catches what the agent admits; the critic catches what the agent omits.",
-            "Mechanisms D + A + (future) human-review panel. Today equivalent to 'both' — the modal panel that pauses on findings with diff highlighted is roadmapped for v0.2.1+. Set this when you want the future-ready intent recorded in your settings."
-          ],
-          "description": "Verification mode applied at the end of wait_for_agents. Default 'structured' applies Mechanism D (structured exit) at zero runtime cost — see research/VERIFICATION_MECHANISMS.md for the full rationale. Set to 'both' for migrations, refactors with assertion contract changes, or anywhere a silent mistake would cost more than the ~$0.002 critic per agent."
         }
       }
     }
@@ -149,7 +134,10 @@
     "compile": "npm run compile:extension && npm run compile:webview",
     "watch:extension": "node esbuild.config.mjs --watch",
     "watch:webview": "vite build --watch",
-    "package": "node esbuild.config.mjs --production && vite build",
+    "typecheck:extension": "tsc --noEmit -p tsconfig.json",
+    "typecheck:webview": "vue-tsc --noEmit -p tsconfig.webview.json",
+    "typecheck": "npm run typecheck:extension && npm run typecheck:webview",
+    "package": "npm run typecheck && node esbuild.config.mjs --production && vite build",
     "vscode:prepublish": "npm run package",
     "lint": "eslint src",
     "test": "vitest run",
@@ -167,11 +155,13 @@
     "@types/node": "^22",
     "@types/vscode": "^1.120.0",
     "@vitejs/plugin-vue": "^5.2.0",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.24.0",
     "happy-dom": "^15.11.7",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.3",
     "vite": "^6.0.0",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.3.3"
   }
 }
