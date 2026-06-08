@@ -6,7 +6,7 @@
  * que emite Vite, reescribían los paths `./assets/...` a URIs
  * `vscode-webview://` y armaban una Content-Security-Policy
  * estricta. La única diferencia era que el detail panel necesitaba
- * inyectar un `<script nonce>` con `window.__claudeOrchestrator`
+ * inyectar un `<script nonce>` con `window.__claudeActivityViewer`
  * para que el bundle Vue arrancara en modo detail.
  *
  * Centralizar evita drift cuando se actualiza la CSP o el patrón
@@ -23,7 +23,7 @@ import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 
 /**
- * Shape estricto del payload inyectado como `window.__claudeOrchestrator`.
+ * Shape estricto del payload inyectado como `window.__claudeActivityViewer`.
  * El consumer Vue (`useDetailMode`) lo lee desde window; mantenemos el
  * shape sincronizado del lado productor para que un typo en `mode` o
  * `agentId` no compile silent en `detail-panel.ts`.
@@ -46,7 +46,7 @@ export interface BuildWebviewHtmlOptions {
   extensionUri: vscode.Uri;
   /**
    * Si se provee, se inyecta un `<script nonce>` antes del bundle
-   * que setea `window.__claudeOrchestrator = inlineConfig`. La CSP
+   * que setea `window.__claudeActivityViewer = inlineConfig`. La CSP
    * se ajusta automáticamente para autorizar el nonce. Pensado
    * para distinguir modo sidebar vs detail.
    */
@@ -100,7 +100,7 @@ export function buildWebviewHtml(opts: BuildWebviewHtmlOptions): string {
   // del browser. Hoy todos los valores son UUIDs/enums controlados,
   // pero el helper es para reuso futuro: endurecer es barato.
   const inlineScript = nonce
-    ? `\n    <script nonce="${nonce}">window.__claudeOrchestrator = ${JSON.stringify(inlineConfig).replace(/</g, '\\u003c')};</script>`
+    ? `\n    <script nonce="${nonce}">window.__claudeActivityViewer = ${JSON.stringify(inlineConfig).replace(/</g, '\\u003c')};</script>`
     : '';
 
   // Orden importante: CSP primero (para que el script inline ya

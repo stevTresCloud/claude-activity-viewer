@@ -6,7 +6,7 @@
  *   1. Disparar scan inicial post-activate (no bloquea).
  *   2. Auto-refresh con `setInterval` configurable
  *      (`scannerRefreshSec`; 0 = off).
- *   3. Comando palette `claudeOrchestrator.rescan` → re-ejecuta now.
+ *   3. Comando palette `claudeActivityViewer.rescan` → re-ejecuta now.
  *   4. Handler de `request_rescan` del webview (botón futuro).
  *   5. Handler de `request_resume_session` → abre terminal nueva
  *      con `claude --resume <sessionId>`.
@@ -46,7 +46,7 @@ const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
  * cuando el user cambia projectsRoot (los project/task derivados
  * en el cache fueron calculados contra el root viejo).
  */
-const SCANNER_CACHE_STATE_KEY = 'claudeOrchestrator.sessionScanCache';
+const SCANNER_CACHE_STATE_KEY = 'claudeActivityViewer.sessionScanCache';
 
 interface PersistedScanCache {
   /**
@@ -367,7 +367,7 @@ export class ScannerController {
       return;
     }
 
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeActivityViewer');
     const confirm = cfg.get<boolean>('resumeConfirm', false);
     const mode = cfg.get<string>('resumeIn', 'chat');
 
@@ -495,12 +495,12 @@ export class ScannerController {
   }
 
   /**
-   * Lee y expande `claudeOrchestrator.projectsRoot`. Mismo
+   * Lee y expande `claudeActivityViewer.projectsRoot`. Mismo
    * tratamiento que el bridge para que las dos puntas coincidan
    * (un proyecto se deriva igual en ambos lados).
    */
   private getProjectsRoot(): string[] {
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeActivityViewer');
     const raw = cfg.get<string[]>('projectsRoot', []);
     return raw.map((p) => expandUserHome(p));
   }
@@ -512,7 +512,7 @@ export class ScannerController {
    * cambia en runtime (no implementado hoy — el user reload).
    */
   private scheduleNext(): void {
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeActivityViewer');
     const intervalSec = cfg.get<number>('scannerRefreshSec', DEFAULT_REFRESH_SEC);
     if (!intervalSec || intervalSec <= 0) {
       this.channel.appendLine('[scanner] auto-refresh disabled');

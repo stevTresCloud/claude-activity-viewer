@@ -1,4 +1,4 @@
-# Claude Orchestrator
+# Claude Activity Viewer
 
 > A read-only activity viewer for your Claude Code agents. Whenever Claude Code spawns sub-agents, they show up live in a VS Code sidebar — model, context usage, status and recent sessions — without leaving the editor.
 
@@ -6,7 +6,7 @@
 
 When you work in Claude Code, a single chat often fans out into several sub-agents — one exploring the repo, one running tests, one searching for a pattern. They run, finish, and disappear into the transcript.
 
-**Claude Orchestrator gives them a window.** It listens to Claude Code's own activity **hooks** and renders every sub-agent in a sidebar dashboard: what's running now, what's queued, what just finished, grouped by project and session. Click any agent to open a detail panel with its live log plus the model, token count and context usage read straight from the session transcript.
+**Claude Activity Viewer gives them a window.** It listens to Claude Code's own activity **hooks** and renders every sub-agent in a sidebar dashboard: what's running now, what's queued, what just finished, grouped by project and session. Click any agent to open a detail panel with its live log plus the model, token count and context usage read straight from the session transcript.
 
 It's **read-only** — it observes, it never spawns, cancels or drives agents. Nothing about your Claude Code workflow changes; you just gain visibility into it.
 
@@ -20,10 +20,10 @@ It's **read-only** — it observes, it never spawns, cancels or drives agents. N
 
 ## Install
 
-1. Download `claude-orchestrator-0.3.0.vsix` from [Releases](https://github.com/stevTresCloud/claude-orchestrator/releases).
-2. Install it: `code --install-extension claude-orchestrator-0.3.0.vsix` (or right-click the `.vsix` in VS Code → *Install Extension VSIX*).
+1. Download `claude-activity-viewer-0.3.1.vsix` from [Releases](https://github.com/stevTresCloud/claude-activity-viewer/releases).
+2. Install it: `code --install-extension claude-activity-viewer-0.3.1.vsix` (or right-click the `.vsix` in VS Code → *Install Extension VSIX*).
 3. Reload VS Code.
-4. Run **`Claude Orchestrator: Install global activity hooks`** from the Command Palette (`Ctrl+Shift+P`). This is a one-time step — it writes the activity hooks into your global `~/.claude/settings.json` so every Claude Code session streams its agents into the dashboard.
+4. Run **`Claude Activity Viewer: Install global activity hooks`** from the Command Palette (`Ctrl+Shift+P`). This is a one-time step — it writes the activity hooks into your global `~/.claude/settings.json` so every Claude Code session streams its agents into the dashboard.
 
 > *Prerequisites: [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) installed and signed in (`claude login`). VS Code 1.120+, Node 22+.*
 
@@ -49,16 +49,16 @@ It's **read-only** — it observes, it never spawns, cancels or drives agents. N
 
 ## Configuration
 
-Settings live under `File → Preferences → Settings → Extensions → Claude Orchestrator`. The defaults are sensible — touch these only if you're tuning.
+Settings live under `File → Preferences → Settings → Extensions → Claude Activity Viewer`. The defaults are sensible — touch these only if you're tuning.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `claudeOrchestrator.projectsRoot` | `[]` | Absolute paths whose direct subfolders are treated as projects, used to derive project/task labels from each agent's working directory. Tildes are expanded. |
-| `claudeOrchestrator.scannerRefreshSec` | `0` | Auto-refresh interval (seconds) for the project + session scanner. `0` = manual rescan only (recommended with many projects). |
-| `claudeOrchestrator.resumeIn` | `"chat"` | Where to open a resumed session: `"chat"` (Claude Code sidebar) or `"terminal"`. |
-| `claudeOrchestrator.resumeConfirm` | `false` | Confirmation dialog before resuming a past session. |
-| `claudeOrchestrator.notifyOnComplete` | `true` | Toast when an agent reaches a terminal state. |
-| `claudeOrchestrator.ingesterDebug` | `false` | Log every translated agent event from the hook stream to the output channel (verbose diagnostics only). |
+| `claudeActivityViewer.projectsRoot` | `[]` | Absolute paths whose direct subfolders are treated as projects, used to derive project/task labels from each agent's working directory. Tildes are expanded. |
+| `claudeActivityViewer.scannerRefreshSec` | `0` | Auto-refresh interval (seconds) for the project + session scanner. `0` = manual rescan only (recommended with many projects). |
+| `claudeActivityViewer.resumeIn` | `"chat"` | Where to open a resumed session: `"chat"` (Claude Code sidebar) or `"terminal"`. |
+| `claudeActivityViewer.resumeConfirm` | `false` | Confirmation dialog before resuming a past session. |
+| `claudeActivityViewer.notifyOnComplete` | `true` | Toast when an agent reaches a terminal state. |
+| `claudeActivityViewer.ingesterDebug` | `false` | Log every translated agent event from the hook stream to the output channel (verbose diagnostics only). |
 
 ## How it works
 
@@ -78,8 +78,8 @@ The activity hooks (`SubagentStart` / `SubagentStop` / `Stop` / `SessionEnd`) ap
 <summary><b>Build from source</b></summary>
 
 ```bash
-git clone git@github.com:stevTresCloud/claude-orchestrator.git
-cd claude-orchestrator
+git clone git@github.com:stevTresCloud/claude-activity-viewer.git
+cd claude-activity-viewer
 npm install
 npm run compile      # bundle extension + webview
 npm run typecheck    # tsc (extension) + vue-tsc (webview)

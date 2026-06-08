@@ -12,7 +12,7 @@
  *
  * El bundle Vite del webview es UNO solo. Distinguimos modo
  * sidebar/detail inyectando un `<script nonce>` antes del bundle
- * que setea `window.__claudeOrchestrator = {mode: 'detail', agentId}`.
+ * que setea `window.__claudeActivityViewer = {mode: 'detail', agentId}`.
  * El App.vue lee eso via useDetailMode y renderea AgentDetailView.
  *
  * El bridge attache este webview al Set de webviews — los eventos
@@ -33,7 +33,7 @@ import { buildWebviewHtml } from './webview-html';
 
 export class DetailPanelManager implements vscode.Disposable {
   /** viewType del panel (estable, no aparece en UI). */
-  public static readonly viewType = 'claudeOrchestrator.detail';
+  public static readonly viewType = 'claudeActivityViewer.detail';
 
   private panel: vscode.WebviewPanel | null = null;
   private currentAgentId: string | null = null;
@@ -101,7 +101,7 @@ export class DetailPanelManager implements vscode.Disposable {
     );
 
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'resources', 'icon.svg');
-    // Builder compartido inyecta el script con `window.__claudeOrchestrator`
+    // Builder compartido inyecta el script con `window.__claudeActivityViewer`
     // que el bundle Vue lee via `useDetailMode` para arrancar
     // AgentDetailView en lugar de la sidebar default.
     panel.webview.html = buildWebviewHtml({

@@ -34,7 +34,7 @@ import {
 
 // === Constantes ===
 
-const STATE_KEY = 'claudeOrchestrator.agents';
+const STATE_KEY = 'claudeActivityViewer.agents';
 // LOG_RING_MAX vive en shared/dashboard-protocol.ts — bridge y store
 // del webview lo respetan en paralelo (importan desde el mismo lugar).
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 días

@@ -1,18 +1,18 @@
 {
-  "name": "claude-orchestrator",
-  "displayName": "Claude Orchestrator",
+  "name": "claude-activity-viewer",
+  "displayName": "Claude Activity Viewer",
   "description": "VS Code extension that surfaces your Claude Code agents live in a sidebar — a read-only activity viewer driven by Claude Code hooks. See running sub-agents, their model and context usage, and recent sessions, without leaving the editor.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "publisher": "stevTresCloud",
   "repository": {
     "type": "git",
-    "url": "https://github.com/stevTresCloud/claude-orchestrator.git"
+    "url": "https://github.com/stevTresCloud/claude-activity-viewer.git"
   },
   "bugs": {
-    "url": "https://github.com/stevTresCloud/claude-orchestrator/issues"
+    "url": "https://github.com/stevTresCloud/claude-activity-viewer/issues"
   },
-  "homepage": "https://github.com/stevTresCloud/claude-orchestrator#readme",
+  "homepage": "https://github.com/stevTresCloud/claude-activity-viewer#readme",
   "keywords": [
     "claude",
     "anthropic",
@@ -42,48 +42,48 @@
   "contributes": {
     "commands": [
       {
-        "command": "claudeOrchestrator.hello",
-        "title": "Claude Orchestrator: Hello"
+        "command": "claudeActivityViewer.hello",
+        "title": "Claude Activity Viewer: Hello"
       },
       {
-        "command": "claudeOrchestrator.rescan",
-        "title": "Claude Orchestrator: Rescan projects and sessions"
+        "command": "claudeActivityViewer.rescan",
+        "title": "Claude Activity Viewer: Rescan projects and sessions"
       },
       {
-        "command": "claudeOrchestrator.focusDashboard",
-        "title": "Claude Orchestrator: Focus dashboard"
+        "command": "claudeActivityViewer.focusDashboard",
+        "title": "Claude Activity Viewer: Focus dashboard"
       },
       {
-        "command": "claudeOrchestrator.installHooks",
-        "title": "Claude Orchestrator: Install global activity hooks"
+        "command": "claudeActivityViewer.installHooks",
+        "title": "Claude Activity Viewer: Install global activity hooks"
       },
       {
-        "command": "claudeOrchestrator.uninstallHooks",
-        "title": "Claude Orchestrator: Uninstall global activity hooks"
+        "command": "claudeActivityViewer.uninstallHooks",
+        "title": "Claude Activity Viewer: Uninstall global activity hooks"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "claudeOrchestrator",
+          "id": "claudeActivityViewer",
           "title": "Claude Agents",
           "icon": "resources/activity-bar.svg"
         }
       ]
     },
     "views": {
-      "claudeOrchestrator": [
+      "claudeActivityViewer": [
         {
           "type": "webview",
-          "id": "claudeOrchestrator.dashboard",
+          "id": "claudeActivityViewer.dashboard",
           "name": "Dashboard"
         }
       ]
     },
     "configuration": {
-      "title": "Claude Orchestrator",
+      "title": "Claude Activity Viewer",
       "properties": {
-        "claudeOrchestrator.projectsRoot": {
+        "claudeActivityViewer.projectsRoot": {
           "type": "array",
           "items": {
             "type": "string"
@@ -91,28 +91,28 @@
           "default": [],
           "description": "Absolute paths. Each direct subfolder of a path here is treated as a project. Used to derive project/task labels in the dashboard from the agent cwd. Tildes (~) are expanded to the user home."
         },
-        "claudeOrchestrator.scannerRefreshSec": {
+        "claudeActivityViewer.scannerRefreshSec": {
           "type": "number",
           "default": 0,
           "minimum": 0,
           "description": "Auto-refresh interval (seconds) for the project + session scanner. 0 disables auto-refresh (default) — use the 'Rescan' button in the dashboard toolbar or the 'Rescan projects and sessions' command. Re-scanning re-parses every .jsonl from disk; with many projects (50+) keep this at 0 to avoid recurring I/O spikes."
         },
-        "claudeOrchestrator.resumeConfirm": {
+        "claudeActivityViewer.resumeConfirm": {
           "type": "boolean",
           "default": false,
           "description": "If true, show a confirmation dialog before resuming a past Claude session."
         },
-        "claudeOrchestrator.notifyOnComplete": {
+        "claudeActivityViewer.notifyOnComplete": {
           "type": "boolean",
           "default": true,
           "description": "If true, show a VS Code notification toast when an agent finishes (done / failed / cancelled). Click 'Open detail' on the toast to jump to the detail panel."
         },
-        "claudeOrchestrator.ingesterDebug": {
+        "claudeActivityViewer.ingesterDebug": {
           "type": "boolean",
           "default": false,
           "description": "If true, log every translated agent event from the global hook stream to the output channel. The viewer ingests events regardless of this flag; it only controls verbose diagnostics."
         },
-        "claudeOrchestrator.resumeIn": {
+        "claudeActivityViewer.resumeIn": {
           "type": "string",
           "enum": [
             "chat",

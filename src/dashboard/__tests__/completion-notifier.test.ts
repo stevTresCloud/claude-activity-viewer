@@ -81,7 +81,7 @@ describe('CompletionNotifier', () => {
   });
 
   it('setting notifyOnComplete=false → NO muestra toast', async () => {
-    __setConfig('claudeOrchestrator', 'notifyOnComplete', false);
+    __setConfig('claudeActivityViewer', 'notifyOnComplete', false);
     const bridge = makeBridgeWithTrigger();
     const showDetail = vi.fn();
     const notifier = new CompletionNotifier({

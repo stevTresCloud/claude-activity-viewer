@@ -12,13 +12,13 @@
  *
  * El extension host decide el modo al construir el HTML del webview
  * y lo inyecta antes del bundle como un `<script nonce>` que setea
- * `window.__claudeOrchestrator = { mode, agentId? }`. Esta función
+ * `window.__claudeActivityViewer = { mode, agentId? }`. Esta función
  * lo lee y normaliza para que el resto del código Vue lo consuma
  * tipado.
  *
  * El DetailPanelManager dispose+recrea el panel cuando el user
  * selecciona otro agente desde el sidebar — el nuevo HTML llega
- * con el `agentId` actualizado en `window.__claudeOrchestrator`.
+ * con el `agentId` actualizado en `window.__claudeActivityViewer`.
  * Por eso este composable solo lee el valor inicial; no hay
  * protocolo "set_agent" mid-life.
  * ================================================================ */
@@ -30,7 +30,7 @@ interface DetailModeConfig {
 
 declare global {
   interface Window {
-    __claudeOrchestrator?: {
+    __claudeActivityViewer?: {
       mode?: string;
       agentId?: string | null;
     };
@@ -43,7 +43,7 @@ declare global {
  * happy-dom / extension host viejo sin inyección).
  */
 export function useDetailMode(): DetailModeConfig {
-  const cfg = typeof window !== 'undefined' ? window.__claudeOrchestrator : undefined;
+  const cfg = typeof window !== 'undefined' ? window.__claudeActivityViewer : undefined;
   const mode = cfg?.mode === 'detail' ? 'detail' : 'sidebar';
   const agentId = mode === 'detail' && typeof cfg?.agentId === 'string' ? cfg.agentId : null;
   return { mode, agentId };

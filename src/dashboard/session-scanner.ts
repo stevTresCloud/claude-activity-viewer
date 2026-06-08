@@ -140,7 +140,7 @@ export interface ScanSessionsOptions {
   /** Path absoluto al root de Claude (típicamente `~/.claude/projects`). */
   claudeProjectsDir: string;
   /**
-   * Roots configurados por el user (`claudeOrchestrator.projectsRoot`)
+   * Roots configurados por el user (`claudeActivityViewer.projectsRoot`)
    * para derivar project/task con la misma lógica que los agentes
    * vivos.
    */

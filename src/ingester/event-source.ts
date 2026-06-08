@@ -2,7 +2,7 @@
  * event-source.ts — Transporte hook → extensión (NDJSON + tail).
  *
  * El forwarder global escribe un evento por línea en un archivo spool
- * (~/.claude/claude-orchestrator/events.jsonl). Esta clase lo tail-ea:
+ * (~/.claude/claude-activity-viewer/events.jsonl). Esta clase lo tail-ea:
  * trackea el offset leído, lee solo lo nuevo en cada cambio, parsea
  * línea a línea y emite el JSON crudo de cada evento válido.
  *

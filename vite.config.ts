@@ -1,5 +1,5 @@
 /**
- * Build del webview de Claude Orchestrator.
+ * Build del webview de Claude Activity Viewer.
  *
  * Bundlea `src/webview/` (Vue 3 + Pinia + Tailwind v4) a `out/webview/`.
  * Corre separado del esbuild del extension host porque target, module

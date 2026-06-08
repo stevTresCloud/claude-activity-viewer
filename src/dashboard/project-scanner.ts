@@ -1,7 +1,7 @@
 /* ================================================================
  * project-scanner.ts — Descubre proyectos desde el filesystem.
  *
- * Lee `claudeOrchestrator.projectsRoot` y lista cada subfolder
+ * Lee `claudeActivityViewer.projectsRoot` y lista cada subfolder
  * directo como un proyecto candidato. Por cada uno consulta git
  * branch + porcelain para sacar branch + dirty flag.
  *

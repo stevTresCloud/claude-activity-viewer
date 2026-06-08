@@ -6,7 +6,7 @@
  *   1. Sidebar (`inlineConfig` ausente) — sin nonce, sin script
  *      inline, CSP estricta sin `'nonce-...'`.
  *   2. Detail (`inlineConfig` presente) — con nonce + script inline
- *      que setea `window.__claudeOrchestrator`, CSP autoriza el
+ *      que setea `window.__claudeActivityViewer`, CSP autoriza el
  *      nonce, `<` escapado para defender contra `</script>` payload.
  *
  * Las dos ramas convergen en el regex de reescritura de assets/ y
@@ -56,8 +56,8 @@ describe('buildWebviewHtml · sidebar (sin inlineConfig)', () => {
     expect(html).toMatch(/script-src vscode-webview:\/\/test;/);
     // Sin <script nonce="..."> inline.
     expect(html).not.toMatch(/<script nonce="/);
-    // Sin window.__claudeOrchestrator.
-    expect(html).not.toContain('window.__claudeOrchestrator');
+    // Sin window.__claudeActivityViewer.
+    expect(html).not.toContain('window.__claudeActivityViewer');
   });
 
   it('reescribe paths ./assets/* a vscode-webview-uri:// del root', () => {
@@ -76,7 +76,7 @@ describe('buildWebviewHtml · detail (con inlineConfig)', () => {
     vi.clearAllMocks();
   });
 
-  it('inyecta nonce + script con window.__claudeOrchestrator', () => {
+  it('inyecta nonce + script con window.__claudeActivityViewer', () => {
     const html = buildWebviewHtml({
       webview: makeWebview(),
       extensionUri,
@@ -84,7 +84,7 @@ describe('buildWebviewHtml · detail (con inlineConfig)', () => {
     });
     expect(html).toMatch(/<script nonce="[A-Za-z0-9+/=]+">/);
     expect(html).toContain(
-      'window.__claudeOrchestrator = {"mode":"detail","agentId":"agent-abc"}',
+      'window.__claudeActivityViewer = {"mode":"detail","agentId":"agent-abc"}',
     );
   });
 

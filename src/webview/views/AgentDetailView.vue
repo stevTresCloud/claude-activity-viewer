@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * AgentDetailView — vista del editor tab cuando el webview se
- * monta en modo `detail` (window.__claudeOrchestrator.mode='detail').
+ * monta en modo `detail` (window.__claudeActivityViewer.mode='detail').
  *
  * Responsabilidades:
  *   1. Pedir hidratación del log al bridge cuando monta

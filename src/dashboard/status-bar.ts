@@ -7,7 +7,7 @@
  *      `onRunningCountChange` del bridge.
  *   2. Refrescar texto + tooltip + visibilidad cada vez que el
  *      count cambia.
- *   3. Disparar el comando `claudeOrchestrator.focusDashboard` al
+ *   3. Disparar el comando `claudeActivityViewer.focusDashboard` al
  *      click para que el usuario salte al sidebar sin pasar por
  *      el palette.
  *
@@ -26,7 +26,7 @@ import * as vscode from 'vscode';
 import type { DashboardBridge } from './bridge';
 
 /** Comando público que invoca el item al click. */
-export const FOCUS_DASHBOARD_COMMAND = 'claudeOrchestrator.focusDashboard';
+export const FOCUS_DASHBOARD_COMMAND = 'claudeActivityViewer.focusDashboard';
 
 export class StatusBarManager implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
@@ -45,7 +45,7 @@ export class StatusBarManager implements vscode.Disposable {
       vscode.StatusBarAlignment.Right,
       100,
     );
-    this.item.name = 'Claude Orchestrator';
+    this.item.name = 'Claude Activity Viewer';
     this.item.command = FOCUS_DASHBOARD_COMMAND;
     // El callback emite el count actual al suscribirse — el primer
     // render es coherente con el bridge sin esperar evento.

@@ -14,7 +14,7 @@
  * visible — exactamente lo que el user pidió ("avisame cuando
  * termine, esté mirando el sidebar o no").
  *
- * Setting `claudeOrchestrator.notifyOnComplete` (default true)
+ * Setting `claudeActivityViewer.notifyOnComplete` (default true)
  * permite opt-out. Útil para usuarios que lanzan muchos agentes
  * por segundo y no quieren burst de toasts.
  *
@@ -55,7 +55,7 @@ export class CompletionNotifier implements vscode.Disposable {
   }
 
   private async onComplete(event: AgentCompletionEvent): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('claudeOrchestrator');
+    const cfg = vscode.workspace.getConfiguration('claudeActivityViewer');
     const enabled = cfg.get<boolean>('notifyOnComplete', true);
     if (!enabled) return;
 

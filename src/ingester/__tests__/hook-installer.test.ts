@@ -29,7 +29,7 @@ beforeEach(() => {
   fs.mkdirSync(join(home, '.claude'), { recursive: true });
   paths = defaultHookPaths(home);
   // Forwarder "bundleado" simulado.
-  forwarderSource = join(dir, 'orchestrator-hook.cjs');
+  forwarderSource = join(dir, 'activity-viewer-hook.cjs');
   fs.writeFileSync(forwarderSource, '// forwarder stub\n');
 });
 
@@ -116,7 +116,7 @@ describe('installHook', () => {
   it('writes a backup before modifying an existing settings.json', () => {
     fs.writeFileSync(paths.settingsPath, JSON.stringify({ hooks: {} }));
     installHook({ forwarderSource, paths });
-    expect(fs.existsSync(paths.settingsPath + '.claude-orchestrator.bak')).toBe(true);
+    expect(fs.existsSync(paths.settingsPath + '.claude-activity-viewer.bak')).toBe(true);
   });
 
   it('creates settings.json when none exists', () => {

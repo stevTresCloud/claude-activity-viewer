@@ -2,7 +2,7 @@
 'use strict';
 
 /* ================================================================
- * orchestrator-hook.cjs — Forwarder global de hooks de Claude Code.
+ * activity-viewer-hook.cjs — Forwarder global de hooks de Claude Code.
  *
  * Lo instala `hook-installer.ts` como comando de los hooks globales
  * del usuario (~/.claude/settings.json). Claude Code lo invoca por
@@ -38,7 +38,7 @@ const path = require('path');
 
 const EVENTS_FILE =
   process.argv[2] ||
-  path.join(os.homedir(), '.claude', 'claude-orchestrator', 'events.jsonl');
+  path.join(os.homedir(), '.claude', 'claude-activity-viewer', 'events.jsonl');
 
 // Umbral del tamaño de línea: por debajo serializamos una sola vez (el
 // caso común). Por encima, acotamos los campos pesados (tool_input de

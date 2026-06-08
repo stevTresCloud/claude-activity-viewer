@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-06-08
+
+**Renamed to Claude Activity Viewer.** The project's public name now matches what it does: a read-only viewer, not an orchestrator. The display name, command titles, settings namespace (`claudeOrchestrator.*` → `claudeActivityViewer.*`), output channel, status-bar entry and the GitHub repository (`claude-orchestrator` → `claude-activity-viewer`) all use the new name. The hook spool directory moved from `~/.claude/claude-orchestrator/` to `~/.claude/claude-activity-viewer/` — reinstall the global activity hooks (`Uninstall` then `Install`) after upgrading so the dashboard keeps receiving events.
+
+No behavior changed; this release is a rename only.
+
 ## [0.3.0] — 2026-06-07
 
 **Pivot to a read-only activity viewer.** v0.1 and v0.2 were an *orchestrator*: an embedded MCP server that spawned, waited on, verified and cancelled Claude Code agents. That role is now better served by Claude Code natively, so the project re-focuses on the part that has lasting value — **observability**. v0.3 watches the agents Claude Code already runs, via its activity hooks, and never spawns or drives them.
@@ -21,7 +27,7 @@ The orchestrator line is preserved and remains installable at tag `v0.2.0`.
 ### Removed
 
 - The embedded **MCP server** and all orchestration tools (`spawn_agents`, `wait_for_agents`, `list_agents`, `get_agent_log`, `cancel_agent`), the `@anthropic-ai/claude-agent-sdk` runner, bearer auth, and the agent-cancel UI.
-- **Verification mechanisms D + A** (structured-exit parsing and the Haiku critic) — they only made sense for an orchestrator that drove the agents. The `claudeOrchestrator.verification` and `claudeOrchestrator.cancelConfirm` settings are gone.
+- **Verification mechanisms D + A** (structured-exit parsing and the Haiku critic) — they only made sense for an orchestrator that drove the agents. The `claudeActivityViewer.verification` and `claudeActivityViewer.cancelConfirm` settings are gone.
 - The `~75 MB` bundle: with the SDK/CLI runner removed, the `.vsix` is now small (no bundled binary).
 
 ### Toolchain
@@ -36,7 +42,7 @@ Second v0.2 milestone — **Mecanismo D + A safety net**. Closes ticket #1 of th
 
 #### Mecanismo D — Structured exit (parse + auto-promote)
 
-- New `claudeOrchestrator.verification` setting: `'none' | 'structured' | 'critic' | 'both' | 'human-review'`. Default `'structured'` (D-only at zero runtime cost). `'human-review'` accepted for forward-compat but behaves identical to `'both'` in v0.2.0 — the modal pause panel is roadmapped for v0.2.1+.
+- New `claudeActivityViewer.verification` setting: `'none' | 'structured' | 'critic' | 'both' | 'human-review'`. Default `'structured'` (D-only at zero runtime cost). `'human-review'` accepted for forward-compat but behaves identical to `'both'` in v0.2.0 — the modal pause panel is roadmapped for v0.2.1+.
 - The bridge appends an exit-schema instruction block to every prompt when verification mode requires it (`structured` / `both` / `human-review`). The instruction asks the agent to emit a fenced JSON block at the end with `status / files_changed / evidence_run / decisions_made_without_consultation / uncertainties` plus 4 anti-rationalization rules (e.g. "self-rationalizing the decision as 'obviously correct' does not exempt you").
 - New helper module `src/runtime/exit-schema.ts` with `EXIT_SCHEMA_V1` (Zod), `parseExitSchema(text)` (tolerant: handles last-fence-wins, plain fence, bare object fallback, 2 MB truncate), and `buildExitSchemaInstruction()` for the prompt block.
 - Bridge promotes status `done` → `needs_review` when the agent declared `decisions_made_without_consultation` OR `uncertainties` non-empty. Emits `agent_status_changed` with `metadata.verificationPromoted: true` so the UI updates immediately.
@@ -69,7 +75,7 @@ Second v0.2 milestone — **Mecanismo D + A safety net**. Closes ticket #1 of th
 
 #### Structured verification log
 
-- Every verification event emits a JSON-parseable log line to the `Claude Orchestrator` Output channel:
+- Every verification event emits a JSON-parseable log line to the `Claude Activity Viewer` Output channel:
   ```
   [HH:MM:SS] [verification] {"event":"parse"|"critic_spawn"|"critic_done"|"critic_error"|"promote", ...}
   ```
@@ -121,7 +127,7 @@ First v0.2 milestone — **transport robustness + critical papercuts**. Closes t
 #### Transport health heuristic (opt-in)
 
 - New `transportState: 'healthy' | 'degraded'` derived from per-waiter timers. When any `wait_for_agents` is alive >60s without resolving, the bridge marks the transport as `degraded` and broadcasts `transport_state_changed` to all webviews.
-- New setting `claudeOrchestrator.showTransportState` (default `false`, opt-in until validated in productive use): when enabled, a yellow banner appears at the top of the dashboard sidebar with copy *"Transport may be slow — agents still running. Re-invoke wait_for_agents from chat to resume the long-poll."* Banner inherits `--color-warning` so it adapts to light/high-contrast/custom VS Code themes.
+- New setting `claudeActivityViewer.showTransportState` (default `false`, opt-in until validated in productive use): when enabled, a yellow banner appears at the top of the dashboard sidebar with copy *"Transport may be slow — agents still running. Re-invoke wait_for_agents from chat to resume the long-poll."* Banner inherits `--color-warning` so it adapts to light/high-contrast/custom VS Code themes.
 - Replay on `attachWebview`: a newly-opened sidebar receives the current state immediately (not just transitions).
 
 #### `get_agent_log` filters for efficient reads
@@ -185,7 +191,7 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 
 - HTTP server embedded in the extension host, listening on `http://127.0.0.1:39127/mcp`.
 - Bearer token auth (256-bit random, persisted in VS Code Secret Storage, timing-safe comparison).
-- **Auto-register** in `~/.claude.json` on activation (merges with existing MCP servers, atomic write, idempotent). Opt-out via `claudeOrchestrator.autoRegisterMcp = false`. Palette command `Claude Orchestrator: Register MCP in Claude Code` re-runs the merge manually. Manual `claude mcp add-json` fallback still printed to the output channel on every activation.
+- **Auto-register** in `~/.claude.json` on activation (merges with existing MCP servers, atomic write, idempotent). Opt-out via `claudeActivityViewer.autoRegisterMcp = false`. Palette command `Claude Activity Viewer: Register MCP in Claude Code` re-runs the merge manually. Manual `claude mcp add-json` fallback still printed to the output channel on every activation.
 - DNS rebinding protection (`enableDnsRebindingProtection: true`, restricted `allowedHosts`).
 - Fresh `McpServer` + `StreamableHTTPServerTransport` per request to dodge a SDK bug (`_streamMapping` leak in stateless+JSON mode).
 
@@ -200,7 +206,7 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 #### Dashboard (Vue 3 + Pinia + Tailwind v4 webview in the VS Code sidebar)
 
 - Three live kanban sections: **NOW PLAYING** (running), **UP NEXT** (pending), **RECENT** (terminal, last 24h grouped by lifecycle).
-- Project groups inside each section, derived from `cwd` vs `claudeOrchestrator.projectsRoot` + workspace folders.
+- Project groups inside each section, derived from `cwd` vs `claudeActivityViewer.projectsRoot` + workspace folders.
 - Project lifecycle states: `active` (green dot), `idle` (<24h, ring), `inactive` (≥24h, ring + opacity).
 - Atoms: `StatusDot` (with optional pulse + halo), `ContextBar` (live tokens, color by threshold), `ModelBadge`, `PriorityPill`, `FailedBadge`.
 - Project selector toolbar (dropdown — `All projects` default, filter to a single project).
@@ -219,7 +225,7 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 
 - X button in each running card (sidebar + detail panel both cancel).
 - AbortController plumbed from card click → scanner-controller → bridge → `AgentRunner` → SDK.
-- Optional confirmation modal (`claudeOrchestrator.cancelConfirm`).
+- Optional confirmation modal (`claudeActivityViewer.cancelConfirm`).
 - `cancel_agent` MCP tool also exposed for chat-driven cancel.
 
 #### Session resume
@@ -240,15 +246,15 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 - Toast on terminal status (`done` / `failed` / `cancelled`).
 - `failed` uses `showWarningMessage` (warning icon); others use `showInformationMessage`.
 - `Open detail` action button → opens the detail panel for that agent.
-- Toggle via `claudeOrchestrator.notifyOnComplete` (default `true`).
+- Toggle via `claudeActivityViewer.notifyOnComplete` (default `true`).
 
 #### Model selection
 
 - Per-task model in `spawn_agents` (`sonnet`, `opus`, `haiku`).
 - Tool description nudges the chat model to ask the user when not specified, especially before expensive long-running tasks.
-- Setting `claudeOrchestrator.defaultModel` for the fallback when `model` is omitted.
+- Setting `claudeActivityViewer.defaultModel` for the fallback when `model` is omitted.
 - Real model id captured from `SDKSystemMessage.init.model` (e.g. `claude-sonnet-4-5-20251022`) and pretty-printed in `ModelBadge` (`Sonnet 4.5`).
-- QuickPick on the palette command `Claude Orchestrator: Test Agent`.
+- QuickPick on the palette command `Claude Activity Viewer: Test Agent`.
 
 #### Context bar
 
@@ -258,8 +264,8 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 
 #### Defensive caps
 
-- `claudeOrchestrator.maxAgentRuntimeSec` (default 2000s) — hard cap on agent lifetime, bridge cancels with `reason=max_runtime_exceeded`. Race-safe against manual cancel.
-- `claudeOrchestrator.stuckDetectionSec` (default 60s) — if a running agent emits no events for N seconds, `wait_for_agents` flags `suspected_stuck=true` in `pending`. Does not cancel — the chat decides.
+- `claudeActivityViewer.maxAgentRuntimeSec` (default 2000s) — hard cap on agent lifetime, bridge cancels with `reason=max_runtime_exceeded`. Race-safe against manual cancel.
+- `claudeActivityViewer.stuckDetectionSec` (default 60s) — if a running agent emits no events for N seconds, `wait_for_agents` flags `suspected_stuck=true` in `pending`. Does not cancel — the chat decides.
 
 #### Configuration (10 settings)
 
@@ -282,4 +288,4 @@ First public release. The extension exposes an embedded MCP server with 5 tools,
 - **First-run scan can take 60–90s.** On first install (or after clearing globalState) the scanner cold-reparses every `.jsonl` in `~/.claude/projects/`. With 150+ sessions across many projects, expect 60–90s before the dashboard fills with `All projects (N)`. Subsequent activations hit the mtime cache and complete in ~25s. The sidebar currently does not show a "Scanning…" indicator during the cold pass — that polish is on the v0.2 backlog. Watch the output channel for `[scanner] scan complete (startup) projects=N sessions=M`.
 - **No "Scanning…" indicator in the sidebar during cold scan.** The dashboard simply shows `All projects (0)` and "No agents yet" until the first scan finishes. Watch the output channel if you want progress. A proper sidebar overlay is on the v0.2 backlog.
 
-[0.1.0]: https://github.com/stevTresCloud/claude-orchestrator/releases/tag/v0.1.0
+[0.1.0]: https://github.com/stevTresCloud/claude-activity-viewer/releases/tag/v0.1.0

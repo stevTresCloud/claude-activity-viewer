@@ -78,7 +78,7 @@ export function postToExtension(event: DashboardEventToExtension): void {
   if (!handle) {
     // Sin tirar — los tests / standalone preview no tienen VS Code.
     // eslint-disable-next-line no-console
-    console.warn('[claude-orchestrator] postToExtension noop (no VS Code handle):', event);
+    console.warn('[claude-activity-viewer] postToExtension noop (no VS Code handle):', event);
     return;
   }
   handle.postMessage(event);

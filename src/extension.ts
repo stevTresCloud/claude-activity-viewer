@@ -31,13 +31,13 @@ import type {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   // OutputChannel compartido para todo el extension host. Vive en
   // context.subscriptions para que VS Code lo libere al desactivar.
-  const channel = vscode.window.createOutputChannel('Claude Orchestrator');
+  const channel = vscode.window.createOutputChannel('Claude Activity Viewer');
   context.subscriptions.push(channel);
 
   // Comando smoke histórico: confirma que el extension host nos puede
   // disparar comandos.
   const helloCmd = vscode.commands.registerCommand(
-    'claudeOrchestrator.hello',
+    'claudeActivityViewer.hello',
     () => {
       vscode.window.showInformationMessage('Claude Activity Viewer activo.');
     },
@@ -69,7 +69,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Comando palette: re-scan manual.
   const rescanCmd = vscode.commands.registerCommand(
-    'claudeOrchestrator.rescan',
+    'claudeActivityViewer.rescan',
     () => {
       void scanner.rescan('manual');
     },
@@ -83,10 +83,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const focusDashboardCmd = vscode.commands.registerCommand(
     FOCUS_DASHBOARD_COMMAND,
     () => {
-      // El viewContainer id del package.json es `claudeOrchestrator`.
+      // El viewContainer id del package.json es `claudeActivityViewer`.
       // VS Code expone `workbench.view.extension.<id>` para enfocarlo.
       void vscode.commands.executeCommand(
-        'workbench.view.extension.claudeOrchestrator',
+        'workbench.view.extension.claudeActivityViewer',
       );
     },
   );
@@ -151,11 +151,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.extensionPath,
     'resources',
     'hooks',
-    'orchestrator-hook.cjs',
+    'activity-viewer-hook.cjs',
   );
 
   const installHooksCmd = vscode.commands.registerCommand(
-    'claudeOrchestrator.installHooks',
+    'claudeActivityViewer.installHooks',
     () => {
       const result = installHook({ forwarderSource, paths: defaultHookPaths() });
       if (result.status === 'error') {
@@ -179,7 +179,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(installHooksCmd);
 
   const uninstallHooksCmd = vscode.commands.registerCommand(
-    'claudeOrchestrator.uninstallHooks',
+    'claudeActivityViewer.uninstallHooks',
     () => {
       const result = uninstallHook(defaultHookPaths());
       channel.appendLine(
@@ -197,7 +197,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // barato (a diferencia del session scanner, que hace cientos por scan).
   const deriveContext = (cwd: string) => {
     const projectsRoot = vscode.workspace
-      .getConfiguration('claudeOrchestrator')
+      .getConfiguration('claudeActivityViewer')
       .get<string[]>('projectsRoot', [])
       .map(expandUserHome);
     const workspaceFolders = (vscode.workspace.workspaceFolders ?? []).map(
@@ -209,7 +209,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Log verboso opt-in del feed traducido (diagnóstico). El ingester
   // corre siempre; este flag solo decide si además loguea cada evento.
   const ingesterDebug = vscode.workspace
-    .getConfiguration('claudeOrchestrator')
+    .getConfiguration('claudeActivityViewer')
     .get<boolean>('ingesterDebug', false);
 
   const hookPaths = defaultHookPaths();

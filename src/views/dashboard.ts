@@ -23,11 +23,11 @@ import { buildWebviewHtml } from './webview-html';
 
 export class DashboardViewProvider implements vscode.WebviewViewProvider {
   /**
-   * id que debe matchear `contributes.views.claudeOrchestrator[].id`
+   * id que debe matchear `contributes.views.claudeActivityViewer[].id`
    * del package.json. Es el handle que VS Code usa para mapear la
    * declaración estática a esta instancia.
    */
-  public static readonly viewType = 'claudeOrchestrator.dashboard';
+  public static readonly viewType = 'claudeActivityViewer.dashboard';
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -45,7 +45,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
   /**
    * Hook que dispara VS Code la primera vez que el usuario abre el
-   * sidebar de Claude Orchestrator. Si `retainContextWhenHidden=true`
+   * sidebar de Claude Activity Viewer. Si `retainContextWhenHidden=true`
    * (configurado en el register), esta función corre solo una vez por
    * sesión del IDE.
    */

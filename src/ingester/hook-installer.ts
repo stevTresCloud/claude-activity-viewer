@@ -4,7 +4,7 @@
  *
  * Mecanismo (precedente: pixel-agents):
  *   1. Copia el forwarder bundleado a un path estable
- *      (~/.claude/claude-orchestrator/hook.cjs).
+ *      (~/.claude/claude-activity-viewer/hook.cjs).
  *   2. Agrega una entrada `node "<dest>"` a los arrays de hooks de los
  *      7 eventos del ciclo de vida.
  *
@@ -28,10 +28,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { HOOK_EVENT_NAMES } from './hook-events';
 
-const HOOK_DIR_NAME = 'claude-orchestrator';
+const HOOK_DIR_NAME = 'claude-activity-viewer';
 const FORWARDER_NAME = 'hook.cjs';
 const EVENTS_FILE_NAME = 'events.jsonl';
-const BACKUP_SUFFIX = '.claude-orchestrator.bak';
+const BACKUP_SUFFIX = '.claude-activity-viewer.bak';
 const HOOK_TIMEOUT_SEC = 5;
 
 export interface HookPaths {
@@ -96,7 +96,7 @@ function isOurEntry(entry: unknown, forwarderDest: string): boolean {
 }
 
 export interface InstallOptions {
-  /** Forwarder bundleado en la extensión (resources/hooks/orchestrator-hook.cjs). */
+  /** Forwarder bundleado en la extensión (resources/hooks/activity-viewer-hook.cjs). */
   forwarderSource: string;
   paths: HookPaths;
 }

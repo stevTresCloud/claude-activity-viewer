@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-`claude-orchestrator` incorporates ideas and patterns from the following open-source projects, and bundles the npm packages listed below. All licenses are compatible with this project's MIT license.
+`claude-activity-viewer` incorporates ideas and patterns from the following open-source projects, and bundles the npm packages listed below. All licenses are compatible with this project's MIT license.
 
 ---
 

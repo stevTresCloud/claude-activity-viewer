@@ -4,7 +4,7 @@
  *
  * Claude Code dispara un hook por cada evento del ciclo de vida y le
  * pasa un payload JSON por stdin. El forwarder global
- * (resources/hooks/orchestrator-hook.cjs) lo escribe como NDJSON; el
+ * (resources/hooks/activity-viewer-hook.cjs) lo escribe como NDJSON; el
  * event-source lo lee y se lo pasa a `parseHookEvent`, que lo valida
  * contra el schema y lo entrega tipado al translator.
  *

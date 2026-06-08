@@ -29,7 +29,7 @@ import {
 import { __resetVscode } from '../../__mocks__/vscode';
 import { makeContext, makeOutputChannel } from './_fixtures';
 
-const STATE_KEY = 'claudeOrchestrator.agents';
+const STATE_KEY = 'claudeActivityViewer.agents';
 
 // =====================================================================
 // === Helpers de test =================================================

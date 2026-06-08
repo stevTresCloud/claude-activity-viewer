@@ -298,7 +298,7 @@ export type DashboardEventToWebview =
     }
   /**
    * Resultado del project scanner: lista de proyectos descubiertos
-   * leyendo `claudeOrchestrator.projectsRoot` desde el filesystem.
+   * leyendo `claudeActivityViewer.projectsRoot` desde el filesystem.
    * El webview los mergea contra los derivados de agentes vivos.
    */
   | { type: 'projects_from_disk'; projects: ProjectFromDisk[]; scannedAtIso: string }
@@ -353,7 +353,7 @@ export type DashboardEventToExtension =
    * Abre (o re-enfoca) el detail panel del agente en un editor tab.
    * Lo dispara el click en el body de una card del sidebar. El
    * DetailPanelManager del extension host crea el WebviewPanel y le
-   * inyecta `window.__claudeOrchestrator.agentId`.
+   * inyecta `window.__claudeActivityViewer.agentId`.
    */
   | { type: 'request_show_detail'; agentId: string };
 
@@ -361,7 +361,7 @@ export type DashboardEventToExtension =
 
 /**
  * Proyecto descubierto por el project scanner leyendo subfolders
- * directos de `claudeOrchestrator.projectsRoot`. Existe aunque no
+ * directos de `claudeActivityViewer.projectsRoot`. Existe aunque no
  * haya agentes lanzados todavía — el dropdown del selector los
  * muestra con count `(0 agents · M sessions)`.
  */
