@@ -640,3 +640,92 @@ describe('DashboardBridge — resurrección de huérfanos', () => {
     expect(snap.reason).toBe('oom');
   });
 });
+
+// =====================================================================
+// === Stale sweep (backstop de liveness) ==============================
+// =====================================================================
+
+describe('DashboardBridge — reconcileStaleAgents', () => {
+  beforeEach(() => __resetVscode());
+  afterEach(() => vi.restoreAllMocks());
+
+  const THRESHOLD = 30_000;
+  const LAST = 100_000;
+  const lastIso = new Date(LAST).toISOString();
+
+  it('cancela un agente running que superó el umbral de silencio', () => {
+    const { bridge } = makeBridge();
+    const webview = makeWebview();
+    bridge.attachWebview(webview as never);
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+
+    const swept = bridge.reconcileStaleAgents(LAST + THRESHOLD + 1, THRESHOLD);
+
+    expect(swept).toBe(1);
+    const done = postedOf(webview, 'agent_completed');
+    expect(done).toHaveLength(1);
+    expect(done[0].result.status).toBe('cancelled');
+    expect(done[0].result.reason).toBe('stale');
+    expect(done[0].result.durationMs).toBeUndefined();
+    expect(bridge.getRunningCount()).toBe(0);
+  });
+
+  it('no toca un agente con actividad dentro del umbral', () => {
+    const { bridge } = makeBridge();
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+
+    expect(bridge.reconcileStaleAgents(LAST + THRESHOLD - 1, THRESHOLD)).toBe(0);
+    expect(bridge.getRunningCount()).toBe(1);
+  });
+
+  it('ignora agentes ya terminales', () => {
+    const { bridge } = makeBridge();
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+    bridge.ingest(completed('agent-1', 500, 'done'));
+
+    expect(bridge.reconcileStaleAgents(LAST + THRESHOLD + 1, THRESHOLD)).toBe(0);
+  });
+
+  it('umbral <= 0 deshabilita el sweep', () => {
+    const { bridge } = makeBridge();
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+
+    expect(bridge.reconcileStaleAgents(LAST + 10_000_000, 0)).toBe(0);
+    expect(bridge.getRunningCount()).toBe(1);
+  });
+
+  it('un agente cerrado por stale revive si vuelve a emitir actividad', () => {
+    const { bridge } = makeBridge();
+    const webview = makeWebview();
+    bridge.attachWebview(webview as never);
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+
+    bridge.reconcileStaleAgents(LAST + THRESHOLD + 1, THRESHOLD);
+    expect(bridge.getRunningCount()).toBe(0);
+
+    // Evento vivo posterior (el agente "seguía pensando") → resurrección.
+    bridge.ingest(statusChanged('agent-1', 'running'));
+
+    expect(bridge.getRunningCount()).toBe(1);
+    const running = postedOf(webview, 'agent_status_changed').filter(
+      (e) => e.status === 'running',
+    );
+    expect(running.length).toBeGreaterThan(0);
+  });
+
+  it('NO revive un cancelled real (session_stop) — terminal duro', () => {
+    const { bridge } = makeBridge();
+    bridge.ingest(created(makeSnapshot({ lastActivityIso: lastIso })));
+    // Cierre por evento del translator: cancelled con reason de sesión.
+    bridge.ingest({
+      type: 'agent_completed',
+      agentId: 'agent-1',
+      result: { status: 'cancelled', tokensUsed: 0, reason: 'session_stop' },
+    });
+    expect(bridge.getRunningCount()).toBe(0);
+
+    bridge.ingest(statusChanged('agent-1', 'running'));
+    // Sigue cerrado: un cancelled de sesión no es recuperable.
+    expect(bridge.getRunningCount()).toBe(0);
+  });
+});

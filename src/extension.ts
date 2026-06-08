@@ -60,6 +60,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
 
+  // Backstop de liveness: cierra como `cancelled` los agentes `running`
+  // que dejan de emitir actividad (cancelados sin SubagentStop, sesiones
+  // sin Stop). Umbral configurable; 0 lo deshabilita. Sweep cada 30s.
+  const staleSec = vscode.workspace
+    .getConfiguration('claudeActivityViewer')
+    .get<number>('staleAgentSec', 20);
+  // Intervalo del sweep < umbral para que el umbral se respete de verdad
+  // (detección ≈ umbral + un tick) sin barrer de más.
+  bridge.startStaleSweep(10_000, staleSec * 1000);
+
   // === Scanner controller ===
   // Orquesta los scanners de proyectos + sesiones históricas, su
   // auto-refresh y el handler de Resume. Arranca post-hydrate.

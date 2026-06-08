@@ -2,7 +2,7 @@
   "name": "claude-activity-viewer",
   "displayName": "Claude Activity Viewer",
   "description": "VS Code extension that surfaces your Claude Code agents live in a sidebar — a read-only activity viewer driven by Claude Code hooks. See running sub-agents, their model and context usage, and recent sessions, without leaving the editor.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "MIT",
   "publisher": "stevTresCloud",
   "repository": {
@@ -106,6 +106,12 @@
           "type": "boolean",
           "default": true,
           "description": "If true, show a VS Code notification toast when an agent finishes (done / failed / cancelled). Click 'Open detail' on the toast to jump to the detail panel."
+        },
+        "claudeActivityViewer.staleAgentSec": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "description": "Seconds of inactivity after which a still-'running' agent is reconciled to 'cancelled'. A cancelled or interrupted agent never emits a stop event, so without this it would linger as running until the IDE restarts. If the agent resumes emitting activity it is revived automatically. 0 disables the sweep (agents then only close on their session's Stop/SessionEnd or an IDE restart)."
         },
         "claudeActivityViewer.ingesterDebug": {
           "type": "boolean",

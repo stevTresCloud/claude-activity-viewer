@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-06-08
+
+### Fixed
+
+- **Cancelled / interrupted agents no longer linger as "running".** When a sub-agent is interrupted (e.g. Esc), Claude Code emits no `SubagentStop`, so the agent stayed in `NOW PLAYING` until the next IDE restart. Two complementary mechanisms now close it:
+  - **Event-driven:** the ingester reconciles still-running agents on their session's `Stop` (end of turn) and `SessionEnd`, marking them `cancelled` (honest `—` duration). Agents still running in the background (reported in `Stop.background_tasks`) are skipped so they are not closed prematurely.
+  - **Time-based backstop:** a periodic sweep cancels any `running` agent that has emitted no activity for `claudeActivityViewer.staleAgentSec` seconds (default 20) — covering sessions that never emit a prompt `Stop`. If the agent resumes emitting activity it is revived automatically. Set the value to 0 to disable the sweep.
+
+### Added
+
+- **`claudeActivityViewer.staleAgentSec` setting** (default 20) — inactivity window before a still-running agent is reconciled to `cancelled`.
+
 ## [0.3.1] — 2026-06-08
 
 **Renamed to Claude Activity Viewer.** The project's public name now matches what it does: a read-only viewer, not an orchestrator. The display name, command titles, settings namespace (`claudeOrchestrator.*` → `claudeActivityViewer.*`), output channel, status-bar entry and the GitHub repository (`claude-orchestrator` → `claude-activity-viewer`) all use the new name. The hook spool directory moved from `~/.claude/claude-orchestrator/` to `~/.claude/claude-activity-viewer/` — reinstall the global activity hooks (`Uninstall` then `Install`) after upgrading so the dashboard keeps receiving events.

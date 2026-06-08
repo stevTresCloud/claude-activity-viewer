@@ -107,6 +107,11 @@ const StopSchema = z
     last_assistant_message: z.string().nullish(),
     session_id: z.string().optional(),
     cwd: z.string().optional(),
+    // Tareas en background vivas al cierre del turno. El translator las
+    // excluye de la reconciliación: un subagente background sigue corriendo
+    // a través del Stop y NO debe marcarse cancelado. Shape tolerante (el
+    // contrato puede ser array de ids o de objetos) — se normaliza al usar.
+    background_tasks: z.array(z.unknown()).optional(),
   })
   .loose();
 
@@ -148,6 +153,8 @@ export type SubagentStartEvent = z.infer<typeof SubagentStartSchema>;
 export type PreToolUseEvent = z.infer<typeof PreToolUseSchema>;
 export type PostToolUseEvent = z.infer<typeof PostToolUseSchema>;
 export type SubagentStopEvent = z.infer<typeof SubagentStopSchema>;
+export type StopEvent = z.infer<typeof StopSchema>;
+export type SessionEndEvent = z.infer<typeof SessionEndSchema>;
 
 // === Parser ===
 

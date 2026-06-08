@@ -328,15 +328,117 @@ describe('SubagentStop', () => {
 });
 
 describe('session-level events', () => {
-  it('Stop / SessionStart / SessionEnd produce no store events in F1', () => {
+  it('SessionStart is a no-op; Stop/SessionEnd without session_id or live agents emit nothing', () => {
     const { translator } = makeTranslator();
-    expect(translator.translate(ev({ hook_event_name: 'Stop' }))).toEqual([]);
     expect(
       translator.translate(ev({ hook_event_name: 'SessionStart', source: 'startup' })),
     ).toEqual([]);
+    // Sin session_id no hay a quién reconciliar.
+    expect(translator.translate(ev({ hook_event_name: 'Stop' }))).toEqual([]);
+    // Con session_id pero sin agentes vivos de esa sesión.
     expect(
-      translator.translate(ev({ hook_event_name: 'SessionEnd', reason: 'clear' })),
+      translator.translate(ev({ hook_event_name: 'SessionEnd', session_id: 'ghost', reason: 'clear' })),
     ).toEqual([]);
+  });
+});
+
+describe('session reconciliation (cancel / interrupt)', () => {
+  function startAgent(translator: HookTranslator, agentId: string, sessionId: string) {
+    translator.translate(
+      ev({
+        hook_event_name: 'SubagentStart',
+        agent_id: agentId,
+        agent_type: 'Explore',
+        session_id: sessionId,
+        cwd: '/p',
+      }),
+    );
+  }
+
+  it('Stop cancels a still-running agent of that session with honest "—" duration', () => {
+    const { translator, advance } = makeTranslator();
+    startAgent(translator, 'a-1', 's-1');
+    advance(5000);
+
+    const out = translator.translate(ev({ hook_event_name: 'Stop', session_id: 's-1' }));
+
+    expect(typesOf(out)).toEqual(['agent_status_changed', 'agent_completed']);
+    const changed = out[0];
+    const done = out[1];
+    if (changed.type !== 'agent_status_changed' || done.type !== 'agent_completed') {
+      throw new Error('unreachable');
+    }
+    expect(changed.status).toBe('cancelled');
+    expect(changed.metadata?.completedAtIso).toBe(new Date(6000).toISOString());
+    expect(done.result.status).toBe('cancelled');
+    expect(done.result.reason).toBe('session_stop');
+    // Sin durationMs: no sabemos cuándo murió realmente.
+    expect(done.result.durationMs).toBeUndefined();
+  });
+
+  it('Stop leaves agents of other sessions untouched', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'a-1', 's-1');
+    startAgent(translator, 'a-2', 's-2');
+
+    const out = translator.translate(ev({ hook_event_name: 'Stop', session_id: 's-1' }));
+
+    const ids = out.map((e) => ('agentId' in e ? e.agentId : undefined));
+    expect(ids).not.toContain('a-2');
+    expect(ids).toContain('a-1');
+  });
+
+  it('does not re-close an agent that already finished with SubagentStop', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'a-1', 's-1');
+    translator.translate(ev({ hook_event_name: 'SubagentStop', agent_id: 'a-1', session_id: 's-1' }));
+
+    expect(translator.translate(ev({ hook_event_name: 'Stop', session_id: 's-1' }))).toEqual([]);
+  });
+
+  it('Stop skips a subagent still running in background', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'bg-1', 's-1');
+
+    const out = translator.translate(
+      ev({ hook_event_name: 'Stop', session_id: 's-1', background_tasks: ['bg-1'] }),
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('extracts background ids from object entries too', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'bg-1', 's-1');
+
+    const out = translator.translate(
+      ev({ hook_event_name: 'Stop', session_id: 's-1', background_tasks: [{ agent_id: 'bg-1' }] }),
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('SessionEnd cancels regardless of background (session is over)', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'bg-1', 's-1');
+
+    const out = translator.translate(
+      ev({ hook_event_name: 'SessionEnd', session_id: 's-1', reason: 'exit' }),
+    );
+    expect(typesOf(out)).toEqual(['agent_status_changed', 'agent_completed']);
+    const done = out[1];
+    if (done.type !== 'agent_completed') throw new Error('unreachable');
+    expect(done.result.status).toBe('cancelled');
+    expect(done.result.reason).toBe('session_end');
+  });
+
+  it('events after a reconciled cancel are ignored (agent is terminal)', () => {
+    const { translator } = makeTranslator();
+    startAgent(translator, 'a-1', 's-1');
+    translator.translate(ev({ hook_event_name: 'Stop', session_id: 's-1' }));
+
+    const late = translator.translate(
+      ev({ hook_event_name: 'PreToolUse', tool_name: 'Read', agent_id: 'a-1', session_id: 's-1' }),
+    );
+    expect(late).toEqual([]);
   });
 });
 

@@ -34,6 +34,8 @@ import type {
   HookEvent,
   PostToolUseEvent,
   PreToolUseEvent,
+  SessionEndEvent,
+  StopEvent,
   SubagentStartEvent,
   SubagentStopEvent,
 } from './hook-events';
@@ -111,11 +113,16 @@ export class HookTranslator {
         return this.onPostToolUse(event);
       case 'SubagentStop':
         return this.onSubagentStop(event);
-      // Eventos de sesión: el agrupador project/session/agent entra en
-      // F3. En F1 el viewer modela subagentes, no la sesión padre.
+      // Fin de turno: los subagentes foreground ya cerraron con su propio
+      // SubagentStop antes de este Stop; uno que siga vivo fue interrumpido
+      // (cancel del usuario, crash). Lo cerramos como `cancelled`, salvo los
+      // que sigan corriendo en background (esos cruzan el Stop legítimamente).
       case 'Stop':
-      case 'SessionStart':
+        return this.onSessionClose(event, 'session_stop', backgroundTaskIds(event.background_tasks));
+      // Fin de sesión: nada puede seguir vivo, ni siquiera background → sin guard.
       case 'SessionEnd':
+        return this.onSessionClose(event, 'session_end', new Set());
+      case 'SessionStart':
         return [];
     }
   }
@@ -258,6 +265,54 @@ export class HookTranslator {
     return events;
   }
 
+  /**
+   * Reconcilia los subagentes que seguían vivos cuando su sesión cerró
+   * el turno (`Stop`) o terminó (`SessionEnd`). Sin un `SubagentStop`
+   * propio el agente quedaría `running` para siempre (lo vimos al
+   * cancelar con Esc); acá lo cerramos como `cancelled`.
+   *
+   * No reportamos `durationMs`: sabemos cuándo lo notamos (el cierre),
+   * no cuándo murió de verdad → la UI muestra "—" en vez de mentir.
+   *
+   * `liveBackgroundIds` excluye los subagentes que siguen corriendo en
+   * background (vienen en `Stop.background_tasks`): cruzan el Stop sin
+   * estar muertos. En `SessionEnd` el set va vacío (ya no corre nada).
+   */
+  private onSessionClose(
+    event: StopEvent | SessionEndEvent,
+    reason: 'session_stop' | 'session_end',
+    liveBackgroundIds: Set<string>,
+  ): DashboardEventToWebview[] {
+    if (!event.session_id) return [];
+
+    const nowMs = this.now();
+    const completedAtIso = new Date(nowMs).toISOString();
+    const events: DashboardEventToWebview[] = [];
+
+    for (const [agentId, state] of this.agents) {
+      if (state.terminal) continue;
+      if (state.sessionId !== event.session_id) continue;
+      if (liveBackgroundIds.has(agentId)) continue;
+
+      state.terminal = true;
+      state.lastActivityMs = nowMs;
+
+      const metadata: Partial<AgentSnapshot> = {
+        completedAtIso,
+        lastActivityIso: completedAtIso,
+        transcriptPath: this.transcriptPathOf(state),
+      };
+
+      events.push({ type: 'agent_status_changed', agentId, status: 'cancelled', metadata });
+      events.push({
+        type: 'agent_completed',
+        agentId,
+        result: { status: 'cancelled', tokensUsed: 0, reason },
+      });
+    }
+    return events;
+  }
+
   // === Helpers ===
 
   /**
@@ -368,6 +423,29 @@ export class HookTranslator {
 }
 
 // === Funciones puras auxiliares ===
+
+/**
+ * Normaliza `Stop.background_tasks` a un set de agent_ids vivos. El
+ * contrato no está congelado, así que es tolerante: acepta array de
+ * strings (ids directos) o de objetos con `agent_id`/`id`/`task_id`.
+ * Cualquier otra forma → set vacío (no excluye nada). Ante la duda NO
+ * agrega un id (mejor reconciliar de más que dejar un muerto colgado).
+ */
+function backgroundTaskIds(raw: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(raw)) return ids;
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      ids.add(item);
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      for (const key of ['agent_id', 'id', 'task_id']) {
+        if (typeof o[key] === 'string') ids.add(o[key] as string);
+      }
+    }
+  }
+  return ids;
+}
 
 function stringifyResult(resp: unknown): string {
   if (resp === undefined || resp === null) return '';

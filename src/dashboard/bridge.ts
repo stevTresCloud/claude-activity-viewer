@@ -156,6 +156,12 @@ export class DashboardBridge {
   // mientras el timer corre se colapsan en uno solo.
   private persistTimer: NodeJS.Timeout | null = null;
 
+  // Sweep de liveness: cierra agentes `running` que dejaron de emitir
+  // actividad (un cancelado/interrumpido no recibe SubagentStop, y su
+  // sesión puede no emitir Stop). Backstop por tiempo del cierre por
+  // eventos del translator.
+  private staleTimer: NodeJS.Timeout | null = null;
+
   constructor(options: DashboardBridgeOptions) {
     this.context = options.context;
     this.channel = options.channel;
@@ -347,14 +353,18 @@ export class DashboardBridge {
   }
 
   /**
-   * ¿El snapshot está en recovery de huérfano? Es el estado "blando" que
-   * pone `hydrate()` (failed con reason='ide_restart') cuando un agente
-   * sobrevive a un reload del IDE: una conjetura de que murió, no un
-   * cierre real. Se distingue de un terminal "duro" (un SubagentStop real,
-   * o failed/cancelled con otra razón) que NO debe revertirse nunca.
+   * ¿El snapshot está en recovery "blando"? Son cierres por conjetura, no
+   * terminales duros: `hydrate()` marca failed/ide_restart al sobrevivir un
+   * reload, y el sweep marca cancelled/stale por silencio. Ambos son
+   * reversibles: si el ingester re-emite un evento vivo del agente, lo
+   * resucitamos. Un terminal duro (SubagentStop real, o cancelled por
+   * session_stop/session_end — la sesión cerró de verdad) NO se revierte.
    */
   private isOrphanRecovery(snapshot: AgentSnapshot): boolean {
-    return snapshot.status === 'failed' && snapshot.reason === 'ide_restart';
+    return (
+      (snapshot.status === 'failed' && snapshot.reason === 'ide_restart') ||
+      (snapshot.status === 'cancelled' && snapshot.reason === 'stale')
+    );
   }
 
   /**
@@ -378,7 +388,7 @@ export class DashboardBridge {
     // un startedAtIso viejo (caso huérfano de un snapshot pre-liveness).
     stored.snapshot.lastActivityIso = new Date().toISOString();
     this.channel.appendLine(
-      `[${ts()}] [bridge] resurrect orphan agent=${agentId.slice(0, 8)} (live event after ide_restart)`,
+      `[${ts()}] [bridge] resurrect agent=${agentId.slice(0, 8)} (live event after soft-terminal)`,
     );
     return true;
   }
@@ -477,6 +487,71 @@ export class DashboardBridge {
     }
     this.schedulePersist();
     this.notifyRunningCount();
+  }
+
+  // ====================================================================
+  // === Liveness sweep (backstop por tiempo) ===========================
+  // ====================================================================
+
+  /**
+   * Arranca el sweep periódico que cierra agentes `running` que llevan
+   * `thresholdMs` sin actividad. Es el backstop del cierre por eventos:
+   * un agente cancelado no emite SubagentStop, y su sesión puede no
+   * emitir Stop, así que sin esto quedaría `running` hasta un reload.
+   *
+   * No-op si ya hay un timer corriendo o si está deshabilitado
+   * (`thresholdMs <= 0`). El timer se limpia en `dispose()`.
+   */
+  startStaleSweep(intervalMs: number, thresholdMs: number): void {
+    if (this.staleTimer || thresholdMs <= 0) return;
+    this.staleTimer = setInterval(() => {
+      this.reconcileStaleAgents(Date.now(), thresholdMs);
+    }, intervalMs);
+    this.channel.appendLine(
+      `[${ts()}] [bridge] stale sweep on (every ${Math.round(intervalMs / 1000)}s, threshold ${Math.round(thresholdMs / 1000)}s)`,
+    );
+  }
+
+  /**
+   * Cierra como `cancelled` (reason 'stale') todo agente `running` cuyo
+   * `lastActivityIso` quedó más viejo que `thresholdMs`. Reusa el camino
+   * normal de cierre (`applyStatusChange` + `applyCompleted`) → mismo
+   * broadcast, persistencia, toast y count que un cierre por evento.
+   *
+   * `nowMs`/`thresholdMs` son parámetros (no lee el reloj global) para
+   * que los tests inyecten tiempo. Devuelve cuántos agentes cerró.
+   *
+   * El cierre es reversible: `isOrphanRecovery` reconoce cancelled/stale,
+   * así que si el agente "seguía pensando" y vuelve a emitir, revive.
+   */
+  reconcileStaleAgents(nowMs: number, thresholdMs: number): number {
+    if (thresholdMs <= 0) return 0;
+    let swept = 0;
+    for (const [agentId, stored] of this.agents) {
+      if (stored.snapshot.status !== 'running') continue;
+      const lastIso = stored.snapshot.lastActivityIso;
+      if (!lastIso) continue;
+      const lastMs = Date.parse(lastIso);
+      if (Number.isNaN(lastMs) || nowMs - lastMs <= thresholdMs) continue;
+
+      const completedAtIso = new Date(nowMs).toISOString();
+      // Mismo par de eventos que un cierre por SubagentStop (status_changed
+      // → completed): el status_changed siembra `completedAtIso` con el
+      // `nowMs` del sweep para que el guard de `applyCompleted` no lo pise
+      // con un timestamp fresco. Sin durationMs: el agente murió en su
+      // última actividad, no ahora → reportarla mentiría; la UI muestra "—".
+      this.applyStatusChange(agentId, 'cancelled', { completedAtIso });
+      this.applyCompleted(agentId, {
+        status: 'cancelled',
+        tokensUsed: stored.snapshot.tokensUsed ?? 0,
+        reason: 'stale',
+      });
+      swept++;
+    }
+    if (swept > 0) {
+      this.channel.appendLine(`[${ts()}] [bridge] stale sweep cancelled ${swept} agent(s)`);
+    }
+    return swept;
   }
 
   /**
@@ -655,6 +730,10 @@ export class DashboardBridge {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
+    }
+    if (this.staleTimer) {
+      clearInterval(this.staleTimer);
+      this.staleTimer = null;
     }
     await this.flush();
   }
