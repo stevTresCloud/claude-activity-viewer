@@ -20,8 +20,8 @@ It's **read-only** — it observes, it never spawns, cancels or drives agents. N
 
 ## Install
 
-1. Download `claude-activity-viewer-0.3.1.vsix` from [Releases](https://github.com/stevTresCloud/claude-activity-viewer/releases).
-2. Install it: `code --install-extension claude-activity-viewer-0.3.1.vsix` (or right-click the `.vsix` in VS Code → *Install Extension VSIX*).
+1. Download `claude-activity-viewer-0.3.0.vsix` from [Releases](https://github.com/stevTresCloud/claude-activity-viewer/releases).
+2. Install it: `code --install-extension claude-activity-viewer-0.3.0.vsix` (or right-click the `.vsix` in VS Code → *Install Extension VSIX*).
 3. Reload VS Code.
 4. Run **`Claude Activity Viewer: Install global activity hooks`** from the Command Palette (`Ctrl+Shift+P`). This is a one-time step — it writes the activity hooks into your global `~/.claude/settings.json` so every Claude Code session streams its agents into the dashboard.
 
@@ -58,6 +58,7 @@ Settings live under `File → Preferences → Settings → Extensions → Claude
 | `claudeActivityViewer.resumeIn` | `"chat"` | Where to open a resumed session: `"chat"` (Claude Code sidebar) or `"terminal"`. |
 | `claudeActivityViewer.resumeConfirm` | `false` | Confirmation dialog before resuming a past session. |
 | `claudeActivityViewer.notifyOnComplete` | `true` | Toast when an agent reaches a terminal state. |
+| `claudeActivityViewer.staleAgentSec` | `20` | Seconds of inactivity before a still-running agent is reconciled to `cancelled` (it never received a stop event). Revived automatically if it resumes emitting. `0` disables. |
 | `claudeActivityViewer.ingesterDebug` | `false` | Log every translated agent event from the hook stream to the output channel (verbose diagnostics only). |
 
 ## How it works

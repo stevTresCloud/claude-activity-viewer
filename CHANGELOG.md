@@ -4,7 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.2] — 2026-06-08
+## [Unreleased]
+
+Cambios posteriores al tag `v0.3.0`, sin nueva versión publicada (uso personal).
+
+### Changed
+
+- **Renamed to Claude Activity Viewer.** The project's public name now matches what it does: a read-only viewer, not an orchestrator. The display name, command titles, settings namespace (`claudeOrchestrator.*` → `claudeActivityViewer.*`), output channel, status-bar entry and the GitHub repository (`claude-orchestrator` → `claude-activity-viewer`) all use the new name. The hook spool directory moved from `~/.claude/claude-orchestrator/` to `~/.claude/claude-activity-viewer/` — reinstall the global activity hooks (`Uninstall` then `Install`) so the dashboard keeps receiving events.
 
 ### Fixed
 
@@ -15,12 +21,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **`claudeActivityViewer.staleAgentSec` setting** (default 20) — inactivity window before a still-running agent is reconciled to `cancelled`.
-
-## [0.3.1] — 2026-06-08
-
-**Renamed to Claude Activity Viewer.** The project's public name now matches what it does: a read-only viewer, not an orchestrator. The display name, command titles, settings namespace (`claudeOrchestrator.*` → `claudeActivityViewer.*`), output channel, status-bar entry and the GitHub repository (`claude-orchestrator` → `claude-activity-viewer`) all use the new name. The hook spool directory moved from `~/.claude/claude-orchestrator/` to `~/.claude/claude-activity-viewer/` — reinstall the global activity hooks (`Uninstall` then `Install`) after upgrading so the dashboard keeps receiving events.
-
-No behavior changed; this release is a rename only.
 
 ## [0.3.0] — 2026-06-07
 

@@ -2,7 +2,7 @@
   "name": "claude-activity-viewer",
   "displayName": "Claude Activity Viewer",
   "description": "VS Code extension that surfaces your Claude Code agents live in a sidebar — a read-only activity viewer driven by Claude Code hooks. See running sub-agents, their model and context usage, and recent sessions, without leaving the editor.",
-  "version": "0.3.2",
+  "version": "0.3.0",
   "license": "MIT",
   "publisher": "stevTresCloud",
   "repository": {
